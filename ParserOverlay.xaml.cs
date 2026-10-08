@@ -189,6 +189,8 @@ namespace EZ2Play.App
         private CancellationTokenSource _assetLoadCts;
         private CoreInputView _manualSearchInputView;
         private bool _manualSearchFromNoMatches;
+        private bool _parserSelectorUpdateScheduled;
+        private bool _isClosing;
 
         private enum ParserMode
         {
@@ -228,6 +230,10 @@ namespace EZ2Play.App
             GamesListBox.ItemsSource = _gameResults;
             CoversListBox.ItemsSource = _gridResults;
             BackgroundsListBox.ItemsSource = _heroResults;
+
+            GamesListBox.SelectionChanged += OnParserSelectionChanged;
+            CoversListBox.SelectionChanged += OnParserSelectionChanged;
+            BackgroundsListBox.SelectionChanged += OnParserSelectionChanged;
 
             Opacity = 0;
             Visibility = Visibility.Collapsed;
@@ -305,9 +311,23 @@ namespace EZ2Play.App
             ParserContentGrid.Visibility = Visibility.Collapsed;
         }
 
+        private void OnParserSelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (!ReferenceEquals(e.OriginalSource, sender)) return;
+            ScheduleParserSelectorUpdate();
+        }
+
         private void ScheduleParserSelectorUpdate()
         {
-            Dispatcher.BeginInvoke(new Action(UpdateParserSelector), DispatcherPriority.Loaded);
+            if (_disposed || _parserSelectorUpdateScheduled) return;
+
+            _parserSelectorUpdateScheduled = true;
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _parserSelectorUpdateScheduled = false;
+                if (!_disposed) UpdateParserSelector();
+            }), DispatcherPriority.Loaded);
         }
 
         private void UpdateParserSelector()
@@ -315,7 +335,7 @@ namespace EZ2Play.App
             if (_selectorCoordinator == null)
                 return;
 
-            if (Visibility != Visibility.Visible)
+            if (Visibility != Visibility.Visible || _isClosing)
             {
                 _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
                 return;
@@ -332,7 +352,7 @@ namespace EZ2Play.App
 
             if (activeListBox == null || activeListBox.SelectedIndex < 0)
             {
-                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, null, null);
                 return;
             }
 
@@ -340,7 +360,7 @@ namespace EZ2Play.App
 
             if (selectedItem == null)
             {
-                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, null, null);
                 return;
             }
 
@@ -355,7 +375,7 @@ namespace EZ2Play.App
 
             if (target == null)
             {
-                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, null, null);
                 return;
             }
 
@@ -424,6 +444,7 @@ namespace EZ2Play.App
             if (launcher == null || launcher.SelectedIndex < 0 || launcher.SelectedIndex >= launcher.Shortcuts.Length)
                 return;
 
+            _isClosing = false;
             _sessionCts?.Dispose();
             _sessionCts = new CancellationTokenSource();
 
@@ -453,6 +474,7 @@ namespace EZ2Play.App
 
             _inputHandler.SetMode(InputHandler.InputMode.Parser);
 
+            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, null, null);
             Visibility = Visibility.Visible;
 
             ScheduleParserSelectorUpdate();
@@ -474,8 +496,9 @@ namespace EZ2Play.App
 
         public void Close()
         {
-            if (Visibility != Visibility.Visible) return;
+            if (Visibility != Visibility.Visible || _isClosing) return;
 
+            _isClosing = true;
             _mainWindow.GetSound()?.PlayBackSound();
             CancelSession();
             CancelAssetLoading();
@@ -754,8 +777,6 @@ namespace EZ2Play.App
             UpdateParserSelector();
             listBox.ScrollIntoView(listBox.SelectedItem);
 
-            ScheduleParserSelectorUpdate();
-
             _mainWindow.GetSound()?.PlayMoveSound();
         }
 
@@ -770,7 +791,7 @@ namespace EZ2Play.App
             GamesListBox.Visibility = Visibility.Collapsed;
             CoversListBox.Visibility = Visibility.Collapsed;
 
-            ScheduleParserSelectorUpdate();
+            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, null, null);
 
             SearchInputBox.Text = string.Empty;
 
@@ -905,6 +926,7 @@ namespace EZ2Play.App
                 GamesListBox.SelectedIndex = 0;
 
             GamesListBox.Focus();
+            ScheduleParserSelectorUpdate();
         }
 
         private async Task SearchCurrentGameAsync(string customQuery, CancellationToken cancellationToken)
@@ -1553,7 +1575,7 @@ namespace EZ2Play.App
                 }
 
                 using (var verifyStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                
+
                 using (var verifyImage = Drawing.Image.FromStream(verifyStream, true, true))
                 {
                     if (verifyImage.Width < 3840)
@@ -1668,6 +1690,10 @@ namespace EZ2Play.App
             if (_disposed) return;
 
             _disposed = true;
+
+            GamesListBox.SelectionChanged -= OnParserSelectionChanged;
+            CoversListBox.SelectionChanged -= OnParserSelectionChanged;
+            BackgroundsListBox.SelectionChanged -= OnParserSelectionChanged;
 
             CancelSession();
             CancelAssetLoading();

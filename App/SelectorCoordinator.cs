@@ -34,12 +34,15 @@ namespace EZ2Play.App
 
         public void ShowMain()
         {
-            if (_disposed)
-                return;
+            if (_disposed) return;
 
-            _ownerGeneration++;
-            _activeOwner = Owner.Main;
-            _selector.Detach();
+            if (_activeOwner != Owner.Main)
+            {
+                ++_ownerGeneration;
+                _activeOwner = Owner.Main;
+                _selector.Detach();
+            }
+
             UpdateMain();
         }
 
@@ -75,8 +78,13 @@ namespace EZ2Play.App
         {
             _mainUpdateScheduled = false;
 
-            if (_disposed || _activeOwner != Owner.Main || generation != _ownerGeneration)
+            if (_disposed || _activeOwner != Owner.Main) return;
+
+            if (generation != _ownerGeneration)
+            {
+                ScheduleMainUpdate();
                 return;
+            }
 
             CarouselItem carouselItem = GetSelectedCarouselItem();
 
@@ -102,15 +110,22 @@ namespace EZ2Play.App
 
         public void ShowOverlay(Owner owner, FrameworkElement target, Selector.SelectorProfile profile)
         {
-            if (_disposed)
-                return;
+            if (_disposed) return;
 
-            _ownerGeneration++;
-            _activeOwner = owner;
-            _selector.Detach();
+            if (_activeOwner != owner)
+            {
+                ++_ownerGeneration;
+                _activeOwner = owner;
+                _selector.Detach();
+            }
 
             if (target == null)
+            {
+                if (_selector.Target != null)
+                    _selector.Detach();
+
                 return;
+            }
 
             _selector.Attach(target, profile);
         }

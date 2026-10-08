@@ -16,7 +16,9 @@ namespace EZ2Play.App
         private SelectorCoordinator _selectorCoordinator;
         private double fadeDuration = 0.1;
         private bool _exitConfirmationMode = false;
+        private bool _isClosing;
         private int _subOptionsSelectedIndex = 0;
+        private bool _selectionHandlersAttached;
 
         public SettingsOverlay(InputHandler inputHandler, MainWindow mainWindow, SelectorCoordinator selectorCoordinator)
         {
@@ -46,13 +48,17 @@ namespace EZ2Play.App
                 if (ExitConfirmationListBox.Items.Count > 0)
                     ExitConfirmationListBox.SelectedIndex = 0;
 
-                SettingsListBox.SelectionChanged += OnSelectionChanged;
-                UpdateOverlaySelector();
-                SubOptionsListBox.SelectionChanged += OnSelectionChanged;
-                ExitConfirmationListBox.SelectionChanged += OnSelectionChanged;
+                if (!_selectionHandlersAttached)
+                {
+                    SettingsListBox.SelectionChanged += OnSelectionChanged;
+                    SubOptionsListBox.SelectionChanged += OnSelectionChanged;
+                    ExitConfirmationListBox.SelectionChanged += OnSelectionChanged;
+                    AutorunToggle.Checked += (sender, args) => ScheduleUpdateTreeHeaderDivider();
+                    AutorunToggle.Unchecked += (sender, args) => ScheduleUpdateTreeHeaderDivider();
+                    _selectionHandlersAttached = true;
+                }
 
-                AutorunToggle.Checked += (sender, args) => ScheduleUpdateTreeHeaderDivider();
-                AutorunToggle.Unchecked += (sender, args) => ScheduleUpdateTreeHeaderDivider();
+                UpdateOverlaySelector();
 
                 UpdateSelectionState();
                 ScheduleUpdateTreeHeaderDivider();
@@ -69,7 +75,7 @@ namespace EZ2Play.App
             if (_selectorCoordinator == null)
                 return;
 
-            if (Visibility != Visibility.Visible)
+            if (Visibility != Visibility.Visible || _isClosing)
             {
                 _selectorCoordinator.Hide(SelectorCoordinator.Owner.Settings);
                 return;
@@ -79,7 +85,10 @@ namespace EZ2Play.App
 
             if (_exitConfirmationMode)
             {
-                activeListBox = ExitConfirmationListBox;
+                var target = ExitConfirmationListBox.SelectedItem as ListBoxItem;
+                _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Settings,
+                    target, _selectorCoordinator.CreateOverlayItemProfile());
+                return;
             }
             else if (SettingsListBox.SelectedItem == TreeItemsContainer &&
                     TreeItemsContainer.Visibility == Visibility.Visible)
@@ -93,7 +102,7 @@ namespace EZ2Play.App
 
             if (activeListBox.SelectedIndex < 0)
             {
-                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Settings);
+                _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Settings, null, null);
                 return;
             }
 
@@ -101,7 +110,7 @@ namespace EZ2Play.App
 
             if (selectedItem == null)
             {
-                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Settings);
+                _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Settings, null, null);
                 return;
             }
 
@@ -111,6 +120,8 @@ namespace EZ2Play.App
 
         private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
         {
+            if (!ReferenceEquals(e.OriginalSource, sender)) return;
+
             UpdateSelectionState();
             UpdateOverlaySelector();
         }
@@ -167,12 +178,14 @@ namespace EZ2Play.App
         {
             if (Visibility == Visibility.Visible) return;
 
+            _isClosing = false;
             _mainWindow.GetSound()?.PlayLaunchSound();
             HideExitDisplayConfirmation(false);
 
             _mainWindow.SetHintsMode(HintPanel.HintMode.Settings);
 
             _inputHandler.SetMode(InputHandler.InputMode.Settings);
+            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Settings, null, null);
             Visibility = Visibility.Visible;
 
             RefreshDisplayList();
@@ -205,8 +218,9 @@ namespace EZ2Play.App
 
         public void Close()
         {
-            if (Visibility != Visibility.Visible) return;
+            if (Visibility != Visibility.Visible || _isClosing) return;
 
+            _isClosing = true;
             _mainWindow.GetSound()?.PlayBackSound();
             _selectorCoordinator.Hide(SelectorCoordinator.Owner.Settings);
 
