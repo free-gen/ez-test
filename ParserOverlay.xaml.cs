@@ -1,0 +1,1719 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using Rectangle = System.Windows.Shapes.Rectangle;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
+using System.Threading;
+using System.Globalization;
+using System.Windows.Input;
+using System.Windows.Threading;
+using Drawing = System.Drawing;
+using Drawing2D = System.Drawing.Drawing2D;
+using DrawingImaging = System.Drawing.Imaging;
+
+using Windows.UI.ViewManagement.Core;
+
+namespace EZ2Play.App
+{
+    public sealed class ParserAssetsPanel : Panel
+    {
+        private double _layoutCellHeight;
+        private double _layoutVerticalGap;
+        private double _layoutHorizontalGap;
+
+        public ParserAssetsPanel()
+        {
+            SnapsToDevicePixels = true;
+            UseLayoutRounding = true;
+        }
+
+        public static readonly DependencyProperty ColumnsProperty =
+            DependencyProperty.Register(nameof(Columns), typeof(int), typeof(ParserAssetsPanel),
+                new FrameworkPropertyMetadata(1, FrameworkPropertyMetadataOptions.AffectsMeasure));
+
+        public static readonly DependencyProperty GapProperty =
+            DependencyProperty.Register(nameof(Gap), typeof(Thickness), typeof(ParserAssetsPanel),
+                new FrameworkPropertyMetadata(new Thickness(0), FrameworkPropertyMetadataOptions.AffectsMeasure));
+
+        public int Columns
+        {
+            get => (int)GetValue(ColumnsProperty);
+            set => SetValue(ColumnsProperty, value);
+        }
+
+        public Thickness Gap
+        {
+            get => (Thickness)GetValue(GapProperty);
+            set => SetValue(GapProperty, value);
+        }
+
+        public double ItemHeight { get; private set; }
+
+        public double VerticalGap => _layoutVerticalGap > 0 ? _layoutVerticalGap : Math.Ceiling(Gap.Top + Gap.Bottom);
+
+        public double GetViewportHeight(int visibleRows, double fallbackItemHeight)
+        {
+            double itemHeight = InternalChildren.Count > 0 && ItemHeight > 0 ? ItemHeight : fallbackItemHeight;
+
+            if (itemHeight <= 0 || visibleRows <= 0)
+                return 0;
+
+            return Math.Ceiling(itemHeight * visibleRows + VerticalGap * Math.Max(0, visibleRows - 1));
+        }
+
+        protected override Size MeasureOverride(Size availableSize)
+        {
+            int columns = Math.Max(1, Columns);
+            int rows = (InternalChildren.Count + columns - 1) / columns;
+
+            if (InternalChildren.Count == 0)
+            {
+                ItemHeight = 0;
+                return new Size();
+            }
+
+            double horizontalGap = Gap.Left + Gap.Right;
+            double verticalGap = Gap.Top + Gap.Bottom;
+
+            double maxWidth = 0;
+            double maxHeight = 0;
+
+            foreach (UIElement child in InternalChildren)
+            {
+                child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+                maxWidth = Math.Max(maxWidth, child.DesiredSize.Width);
+                maxHeight = Math.Max(maxHeight, child.DesiredSize.Height);
+            }
+
+            double cellWidth = double.IsInfinity(availableSize.Width)
+                ? maxWidth
+                : Math.Max(0, (availableSize.Width - horizontalGap * (columns - 1)) / columns);
+
+            foreach (UIElement child in InternalChildren)
+            {
+                child.Measure(new Size(cellWidth, double.PositiveInfinity));
+            }
+
+            maxHeight = InternalChildren
+                .Cast<UIElement>()
+                .Max(child => child.DesiredSize.Height);
+
+            _layoutCellHeight = Math.Ceiling(maxHeight);
+            _layoutVerticalGap = Math.Ceiling(verticalGap);
+            _layoutHorizontalGap = Math.Ceiling(horizontalGap);
+            ItemHeight = _layoutCellHeight;
+
+            double desiredWidth = double.IsInfinity(availableSize.Width)
+                ? cellWidth * columns + horizontalGap * (columns - 1) : availableSize.Width;
+
+            double desiredHeight = _layoutCellHeight * rows + _layoutVerticalGap * Math.Max(0, rows - 1);
+
+            return new Size(desiredWidth, desiredHeight);
+        }
+
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            int columns = Math.Max(1, Columns);
+
+            double horizontalGap = _layoutHorizontalGap;
+            double verticalGap = _layoutVerticalGap;
+
+            double cellWidth =
+                Math.Max(0, (finalSize.Width - horizontalGap * (columns - 1)) / columns);
+
+            double cellHeight = _layoutCellHeight;
+
+            for (int index = 0; index < InternalChildren.Count; index++)
+            {
+                int row = index / columns;
+                int column = index % columns;
+
+                double x = Math.Round(column * (cellWidth + horizontalGap));
+                double y = row * (cellHeight + verticalGap);
+                double right = Math.Round((column + 1) * (cellWidth + horizontalGap) - horizontalGap);
+
+                InternalChildren[index].Arrange(new Rect(x, y, right - x, cellHeight));
+            }
+
+            return finalSize;
+        }
+    }
+
+    public partial class ParserOverlay : UserControl, IDisposable
+    {
+        private const int GridColumns = 4;
+        private const int BackgroundColumns = 2;
+        private const int CoversVisibleRows = 2;
+        private const int BackgroundsVisibleRows = 3;
+        private const int MaxGames = 15;
+        private const int MaxCovers = 30;
+        private const int MaxBackgrounds = 30;
+        private const double FadeDuration = 0.1;
+        private const int GameSearchTimeoutSeconds = 3;
+        private const double ManualSearchKeyboardGap = 32;
+
+        private readonly InputHandler _inputHandler;
+        private readonly MainWindow _mainWindow;
+        private readonly AppConfig _config;
+        private readonly SelectorCoordinator _selectorCoordinator;
+        private const double StatusAutoHideSeconds = 5;
+        private readonly DispatcherTimer _statusTimer;
+
+        private readonly SteamGridDbClient _steamGridDbClient;
+
+        private CancellationTokenSource _sessionCts;
+        private bool _disposed;
+
+        private CultureInfo _inputLanguageBeforeManualSearch;
+        private bool _inputLanguageCaptured;
+
+        private readonly ObservableCollection<ParserGameResult> _gameResults = new ObservableCollection<ParserGameResult>();
+        private readonly ObservableCollection<ParserGridResult> _gridResults = new ObservableCollection<ParserGridResult>();
+        private readonly ObservableCollection<ParserGridResult> _heroResults = new ObservableCollection<ParserGridResult>();
+
+        private ShortcutInfo _shortcut;
+        private ParserGameResult _assetGame;
+        private ParserMode _mode = ParserMode.Games;
+        private bool _backgroundsLoaded;
+        private bool _isBusy;
+
+        private CancellationTokenSource _assetLoadCts;
+        private CoreInputView _manualSearchInputView;
+        private bool _manualSearchFromNoMatches;
+
+        private enum ParserMode
+        {
+            Games,
+            Covers,
+            Backgrounds
+        }
+
+        public ParserOverlay(InputHandler inputHandler, MainWindow mainWindow, SelectorCoordinator selectorCoordinator)
+        {
+            InitializeComponent();
+            Locals.ApplyLocalization(this);
+
+            _statusTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(StatusAutoHideSeconds)
+            };
+
+            _statusTimer.Tick += (sender, args) =>
+            {
+                if (!_isBusy && ParserSurface.Visibility == Visibility.Collapsed)
+                {
+                    Close();
+                    return;
+                }
+
+                HideStatus();
+            };
+
+            _inputHandler = inputHandler;
+            _mainWindow = mainWindow;
+            _config = _mainWindow.GetConfig();
+            _selectorCoordinator = selectorCoordinator;
+
+            _steamGridDbClient = new SteamGridDbClient();
+
+            GamesListBox.ItemsSource = _gameResults;
+            CoversListBox.ItemsSource = _gridResults;
+            BackgroundsListBox.ItemsSource = _heroResults;
+
+            Opacity = 0;
+            Visibility = Visibility.Collapsed;
+        }
+
+        private void ConfigureApiAuthorization()
+        {
+            string apiKey = _config?.SteamGridDbApiKey?.Trim();
+            _steamGridDbClient.ConfigureFallbackAuthorization(apiKey);
+        }
+
+        private bool IsCurrentSession(CancellationToken cancellationToken)
+        {
+            return !_disposed && _sessionCts != null && cancellationToken == _sessionCts.Token;
+        }
+
+        private bool IsSessionActive(CancellationToken cancellationToken)
+        {
+            return IsCurrentSession(cancellationToken) &&
+                   !cancellationToken.IsCancellationRequested &&
+                   Visibility == Visibility.Visible;
+        }
+
+        private void CancelSession()
+        {
+            try
+            {
+                _sessionCts?.Cancel();
+            }
+
+            catch
+            {
+            }
+        }
+
+        private void CaptureInputLanguage()
+        {
+            if (_inputLanguageCaptured) return;
+
+            _inputLanguageBeforeManualSearch = SystemProvider.ForceEnglishInputLanguage();
+            _inputLanguageCaptured = true;
+        }
+
+        private void RestoreInputLanguage()
+        {
+            if (!_inputLanguageCaptured) return;
+
+            SystemProvider.RestoreInputLanguage(_inputLanguageBeforeManualSearch);
+
+            _inputLanguageBeforeManualSearch = null;
+            _inputLanguageCaptured = false;
+        }
+
+        private void CancelAssetLoading()
+        {
+            _assetLoadCts?.Cancel();
+
+            AssetsProgressBar.IsIndeterminate = false;
+            AssetsProgressBar.Visibility = Visibility.Collapsed;
+            AssetsProgressBar.Value = 0;
+
+            CoversListBox.Opacity = 1.0;
+            BackgroundsListBox.Opacity = 1.0;
+        }
+
+        private void ShowParserSurface()
+        {
+            ParserSurface.Visibility = Visibility.Visible;
+            ParserContentGrid.Visibility = Visibility.Visible;
+        }
+
+        private void HideParserSurface()
+        {
+            ParserSurface.Visibility = Visibility.Collapsed;
+            ParserContentGrid.Visibility = Visibility.Collapsed;
+        }
+
+        private void ScheduleParserSelectorUpdate()
+        {
+            Dispatcher.BeginInvoke(new Action(UpdateParserSelector), DispatcherPriority.Loaded);
+        }
+
+        private void UpdateParserSelector()
+        {
+            if (_selectorCoordinator == null)
+                return;
+
+            if (Visibility != Visibility.Visible)
+            {
+                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                return;
+            }
+
+            ListBox activeListBox = null;
+
+            if (_mode == ParserMode.Games && GamesListBox.Visibility == Visibility.Visible)
+                activeListBox = GamesListBox;
+            else if (_mode == ParserMode.Covers && CoversListBox.Visibility == Visibility.Visible)
+                activeListBox = CoversListBox;
+            else if (_mode == ParserMode.Backgrounds && BackgroundsListBox.Visibility == Visibility.Visible)
+                activeListBox = BackgroundsListBox;
+
+            if (activeListBox == null || activeListBox.SelectedIndex < 0)
+            {
+                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                return;
+            }
+
+            var selectedItem = activeListBox.ItemContainerGenerator.ContainerFromIndex(activeListBox.SelectedIndex) as ListBoxItem;
+
+            if (selectedItem == null)
+            {
+                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                return;
+            }
+
+            FrameworkElement target = selectedItem;
+            Selector.SelectorProfile profile = _selectorCoordinator.CreateOverlayItemProfile();
+
+            if (_mode == ParserMode.Covers || _mode == ParserMode.Backgrounds)
+            {
+                target = FindVisualChild<Rectangle>(selectedItem);
+                profile = _selectorCoordinator.CreateMediaProfile();
+            }
+
+            if (target == null)
+            {
+                _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+                return;
+            }
+
+            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, target, profile);
+        }
+
+        private static T FindVisualChild<T>(DependencyObject parent)
+            where T : DependencyObject
+        {
+            if (parent == null)
+                return null;
+
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(parent, i);
+
+                if (child is T result)
+                    return result;
+
+                T nestedResult = FindVisualChild<T>(child);
+
+                if (nestedResult != null)
+                    return nestedResult;
+            }
+
+            return null;
+        }
+
+        private void UpdateAssetViewportHeight(ListBox listBox, int visibleRows, string mediaHeightKey)
+        {
+            listBox.ApplyTemplate();
+            listBox.UpdateLayout();
+
+            ParserAssetsPanel panel = FindVisualChild<ParserAssetsPanel>(listBox);
+
+            double mediaHeight = (double)FindResource(mediaHeightKey);
+            double fallbackItemHeight = mediaHeight;
+            double contentHeight;
+
+            if (panel != null)
+            {
+                contentHeight = panel.GetViewportHeight(visibleRows, fallbackItemHeight);
+            }
+            else
+            {
+                Thickness gap = (Thickness)FindResource(UiScaleKeys.ParserAssetsGap);
+
+                double verticalGap = gap.Top + gap.Bottom;
+
+                contentHeight = Math.Ceiling(fallbackItemHeight * visibleRows + verticalGap * Math.Max(0, visibleRows - 1));
+            }
+
+            double outerMargin = listBox.Margin.Top + listBox.Margin.Bottom;
+
+            ParserContentGrid.Height = Math.Ceiling(contentHeight + outerMargin);
+        }
+
+        public async void Open()
+        {
+            if (_disposed || Visibility == Visibility.Visible) return;
+
+            _mainWindow.GetSound()?.PlayLaunchSound();
+
+            var launcher = _mainWindow.GetLauncher();
+
+            if (launcher == null || launcher.SelectedIndex < 0 || launcher.SelectedIndex >= launcher.Shortcuts.Length)
+                return;
+
+            _sessionCts?.Dispose();
+            _sessionCts = new CancellationTokenSource();
+
+            CancellationToken cancellationToken = _sessionCts.Token;
+
+            _shortcut = launcher.Shortcuts[launcher.SelectedIndex];
+            _mode = ParserMode.Games;
+            ParserContentGrid.Height = double.NaN;
+            HideParserSurface();
+            _isBusy = false;
+            _manualSearchFromNoMatches = false;
+
+            _gameResults.Clear();
+            _gridResults.Clear();
+            _heroResults.Clear();
+
+            _assetGame = null;
+            _backgroundsLoaded = false;
+
+            AssetTabsPanel.Visibility = Visibility.Collapsed;
+            GamesListBox.Visibility = Visibility.Visible;
+            CoversListBox.Visibility = Visibility.Collapsed;
+            BackgroundsListBox.Visibility = Visibility.Collapsed;
+            ManualSearchPanel.Visibility = Visibility.Collapsed;
+
+            ShowStatus(Locals.GetString("GridDBSearch"));
+
+            _inputHandler.SetMode(InputHandler.InputMode.Parser);
+
+            Visibility = Visibility.Visible;
+
+            ScheduleParserSelectorUpdate();
+
+            var fadeIn = new DoubleAnimation
+            {
+                From = 0,
+                To = 1,
+                Duration = TimeSpan.FromSeconds(FadeDuration),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+
+            BeginAnimation(OpacityProperty, fadeIn);
+
+            ConfigureApiAuthorization();
+
+            await SearchCurrentGameAsync(null, cancellationToken);
+        }
+
+        public void Close()
+        {
+            if (Visibility != Visibility.Visible) return;
+
+            _mainWindow.GetSound()?.PlayBackSound();
+            CancelSession();
+            CancelAssetLoading();
+            HideStatus();
+            _selectorCoordinator.Hide(SelectorCoordinator.Owner.Parser);
+
+            if (_manualSearchInputView != null)
+            {
+                _manualSearchInputView.PrimaryViewHiding -= ManualSearchInputView_Hiding;
+                _manualSearchInputView.OcclusionsChanged -= ManualSearchInputView_OcclusionsChanged;
+                _manualSearchInputView = null;
+            }
+
+            ParserSurface.RenderTransform = null;
+
+            SystemProvider.HideSystemKeyboard();
+            RestoreInputLanguage();
+
+            ManualSearchPanel.Visibility = Visibility.Collapsed;
+            _manualSearchFromNoMatches = false;
+
+            var fadeOut = new DoubleAnimation
+            {
+                From = Opacity,
+                To = 0,
+                Duration = TimeSpan.FromSeconds(FadeDuration),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            };
+
+            fadeOut.Completed += (s, e) =>
+            {
+                Visibility = Visibility.Collapsed;
+
+                _selectorCoordinator.ShowMain();
+
+                _inputHandler.SetMode(InputHandler.InputMode.Main);
+                _mainWindow.SetHintsMode(HintPanel.HintMode.Main);
+            };
+
+            BeginAnimation(OpacityProperty, fadeOut);
+        }
+
+        public void Back()
+        {
+            if (_mode == ParserMode.Covers || _mode == ParserMode.Backgrounds)
+            {
+                _mainWindow.GetSound()?.PlayBackSound();
+                CancelAssetLoading();
+
+                _mode = ParserMode.Games;
+                ParserContentGrid.Height = double.NaN;
+
+                AssetTabsPanel.Visibility = Visibility.Collapsed;
+                CoversListBox.Visibility = Visibility.Collapsed;
+                BackgroundsListBox.Visibility = Visibility.Collapsed;
+                GamesListBox.Visibility = Visibility.Visible;
+
+                _mainWindow.SetHintsMode(HintPanel.HintMode.ParserGames);
+
+                HideStatus();
+
+                if (_gameResults.Count > 0 && GamesListBox.SelectedIndex < 0)
+                    GamesListBox.SelectedIndex = 0;
+
+                GamesListBox.Focus();
+
+                ScheduleParserSelectorUpdate();
+
+                return;
+            }
+
+            Close();
+        }
+
+        public void NavigateHorizontal(int direction)
+        {
+            if (_isBusy || _mode == ParserMode.Games) return;
+
+            ListBox listBox = _mode == ParserMode.Covers ? CoversListBox : BackgroundsListBox;
+            int columns = _mode == ParserMode.Covers ? GridColumns : BackgroundColumns;
+
+            if (listBox.Items.Count == 0) return;
+
+            int index = Math.Max(0, listBox.SelectedIndex);
+            int column = index % columns;
+
+            if (direction < 0 && column == 0) return;
+            if (direction > 0 && column == columns - 1) return;
+
+            MoveSelection(listBox, index + Math.Sign(direction));
+        }
+
+        public void NavigateVertical(int direction)
+        {
+            if (_isBusy) return;
+
+            if (_mode == ParserMode.Games)
+            {
+                if (GamesListBox.Items.Count == 0) return;
+
+                int index = Math.Max(0, GamesListBox.SelectedIndex);
+                MoveSelection(GamesListBox, index + Math.Sign(direction));
+                return;
+            }
+
+            ListBox listBox = _mode == ParserMode.Covers ? CoversListBox : BackgroundsListBox;
+            int columns = _mode == ParserMode.Covers ? GridColumns : BackgroundColumns;
+
+            if (listBox.Items.Count == 0) return;
+
+            int indexAsset = Math.Max(0, listBox.SelectedIndex);
+            MoveSelection(listBox, indexAsset + Math.Sign(direction) * columns);
+        }
+
+        private async Task SetActiveParserAssetTab(ParserMode mode)
+        {
+            _mode = mode;
+            UpdateAssetTabs();
+
+            if (mode == ParserMode.Covers)
+            {
+                ShowCoversTab();
+                return;
+            }
+
+            if (mode == ParserMode.Backgrounds)
+            {
+                if (!_backgroundsLoaded)
+                    await LoadBackgroundsAsync(_assetGame, _sessionCts.Token);
+                else
+                    ShowBackgroundsTab();
+            }
+        }
+
+        public async void SwitchAssetTab(int direction)
+        {
+            if (_isBusy || _mode == ParserMode.Games || _assetGame == null || _sessionCts == null)
+                return;
+
+            if (direction < 0)
+            {
+                if (_mode == ParserMode.Covers)
+                    return;
+
+                _mainWindow.GetSound()?.PlayTabSound();
+                await SetActiveParserAssetTab(ParserMode.Covers);
+                return;
+            }
+
+            if (direction > 0)
+            {
+                if (_mode == ParserMode.Backgrounds)
+                    return;
+
+                _mainWindow.GetSound()?.PlayTabSound();
+                await SetActiveParserAssetTab(ParserMode.Backgrounds);
+            }
+        }
+
+        private void UpdateAssetTabs()
+        {
+            AssetTabsPanel.Visibility = _mode == ParserMode.Games ? Visibility.Collapsed : Visibility.Visible;
+
+            ParserCoversTabText.Opacity = _mode == ParserMode.Covers ? 1.0 : 0.5;
+            ParserBackgroundsTabText.Opacity = _mode == ParserMode.Backgrounds ? 1.0 : 0.5;
+        }
+
+        private void ShowCoversTab()
+        {
+            BackgroundsListBox.Visibility = Visibility.Collapsed;
+            UpdateAssetViewportHeight(CoversListBox, CoversVisibleRows, UiScaleKeys.ParserCoverSize);
+
+            if (_gridResults.Count == 0)
+            {
+                CoversListBox.Visibility = Visibility.Collapsed;
+                ShowStatus(Locals.GetString("NoResultsFound"));
+                ScheduleParserSelectorUpdate();
+                return;
+            }
+
+            HideStatus();
+
+            CoversListBox.Visibility = Visibility.Visible;
+
+            if (CoversListBox.SelectedIndex < 0)
+                CoversListBox.SelectedIndex = 0;
+
+            CoversListBox.ScrollIntoView(CoversListBox.SelectedItem);
+            CoversListBox.Focus();
+            ScheduleParserSelectorUpdate();
+        }
+
+        private void ShowBackgroundsTab()
+        {
+            CoversListBox.Visibility = Visibility.Collapsed;
+            UpdateAssetViewportHeight(BackgroundsListBox, BackgroundsVisibleRows, UiScaleKeys.ParserBackgroundHeight);
+
+            if (_heroResults.Count == 0)
+            {
+                BackgroundsListBox.Visibility = Visibility.Collapsed;
+                ShowStatus(Locals.GetString("NoResultsFound"));
+                ScheduleParserSelectorUpdate();
+                return;
+            }
+
+            HideStatus();
+
+            BackgroundsListBox.Visibility = Visibility.Visible;
+
+            if (BackgroundsListBox.SelectedIndex < 0)
+                BackgroundsListBox.SelectedIndex = 0;
+
+            BackgroundsListBox.ScrollIntoView(BackgroundsListBox.SelectedItem);
+            BackgroundsListBox.Focus();
+            ScheduleParserSelectorUpdate();
+        }
+
+        public void Search()
+        {
+            if (_isBusy) return;
+            if (_mode != ParserMode.Games) return;
+            if (GamesListBox.Visibility != Visibility.Visible) return;
+            if (_sessionCts == null) return;
+
+            ShowManualSearch(false, _sessionCts.Token);
+        }
+
+        public async void Confirm()
+        {
+            if (_isBusy || _sessionCts == null) return;
+
+            if (_mode == ParserMode.Games)
+            {
+                var game = GamesListBox.SelectedItem as ParserGameResult;
+
+                if (game != null)
+                {
+                    _mainWindow.GetSound()?.PlayLaunchSound();
+                    await LoadCoversAsync(game, _sessionCts.Token);
+                }
+
+                return;
+            }
+
+            if (_mode == ParserMode.Backgrounds)
+            {
+                var background = BackgroundsListBox.SelectedItem as ParserGridResult;
+
+                if (background != null)
+                {
+                    _mainWindow.GetSound()?.PlayLaunchSound();
+                    await DownloadBackgroundAsync(background, _sessionCts.Token);
+                }
+
+                return;
+            }
+
+            var cover = CoversListBox.SelectedItem as ParserGridResult;
+
+            if (cover != null)
+            {
+                _mainWindow.GetSound()?.PlayLaunchSound();
+                await DownloadCoverAsync(cover, _sessionCts.Token);
+            }
+        }
+
+        private void MoveSelection(ListBox listBox, int targetIndex)
+        {
+            if (listBox.Items.Count == 0) return;
+
+            targetIndex = Math.Max(0, Math.Min(targetIndex, listBox.Items.Count - 1));
+
+            if (targetIndex == listBox.SelectedIndex) return;
+            
+            listBox.SelectedIndex = targetIndex;
+            UpdateParserSelector();
+            listBox.ScrollIntoView(listBox.SelectedItem);
+
+            ScheduleParserSelectorUpdate();
+
+            _mainWindow.GetSound()?.PlayMoveSound();
+        }
+
+        private async void ShowManualSearch(bool showHint, CancellationToken cancellationToken)
+        {
+            if (!IsSessionActive(cancellationToken)) return;
+
+            _manualSearchFromNoMatches = showHint;
+
+            HideStatus();
+
+            GamesListBox.Visibility = Visibility.Collapsed;
+            CoversListBox.Visibility = Visibility.Collapsed;
+
+            ScheduleParserSelectorUpdate();
+
+            SearchInputBox.Text = string.Empty;
+
+            if (showHint)
+            {
+                ManualSearchHintText.Text = Locals.GetString("ManualSearchHint");
+                ManualSearchHintText.Visibility = Visibility.Visible;
+            }
+
+            else
+            {
+                ManualSearchHintText.Text = string.Empty;
+                ManualSearchHintText.Visibility = Visibility.Collapsed;
+            }
+
+            ShowParserSurface();
+            ManualSearchPanel.Visibility = Visibility.Visible;
+            ParserSurface.RenderTransform = null;
+
+            // Manual search uses the settings-style hint layout.
+            _mainWindow.SetHintsMode(HintPanel.HintMode.Settings);
+
+            // Switch input language to English before focusing the search field.
+            CaptureInputLanguage();
+
+            SearchInputBox.UpdateLayout();
+
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+
+            if (!IsSessionActive(cancellationToken))
+            {
+                RestoreInputLanguage();
+                return;
+            }
+
+            SearchInputBox.Focus();
+            Keyboard.Focus(SearchInputBox);
+            SearchInputBox.SelectAll();
+
+            try
+            {
+                await Task.Delay(100, cancellationToken);
+            }
+
+            catch (OperationCanceledException)
+            {
+                RestoreInputLanguage();
+                return;
+            }
+
+            if (!IsSessionActive(cancellationToken))
+            {
+                RestoreInputLanguage();
+                return;
+            }
+
+            if (_mainWindow.IsGamepadConnected)
+            {
+                try
+                {
+                    _manualSearchInputView = CoreInputView.GetForCurrentView();
+
+                    if (_manualSearchInputView != null)
+                    {
+                        _manualSearchInputView.PrimaryViewHiding -= ManualSearchInputView_Hiding;
+                        _manualSearchInputView.PrimaryViewHiding += ManualSearchInputView_Hiding;
+                        _manualSearchInputView.OcclusionsChanged -= ManualSearchInputView_OcclusionsChanged;
+                        _manualSearchInputView.OcclusionsChanged += ManualSearchInputView_OcclusionsChanged;
+                    }
+                }
+
+                catch
+                {
+                }
+
+                SystemProvider.ShowGamepadKeyboard();
+            }
+        }
+
+        private void ManualSearchInputView_OcclusionsChanged(CoreInputView sender, CoreInputViewOcclusionsChangedEventArgs args)
+        {
+            if (ManualSearchPanel.Visibility != Visibility.Visible) return;
+
+            double currentOffset = (ParserSurface.RenderTransform as TranslateTransform)?.Y ?? 0;
+            Point inputPosition = SearchInputBox.TranslatePoint(new Point(0, 0), _mainWindow);
+
+            double inputLeft = inputPosition.X;
+            double inputRight = inputPosition.X + SearchInputBox.ActualWidth;
+            double inputBottom = inputPosition.Y + SearchInputBox.ActualHeight - currentOffset;
+            double requiredOffset = 0;
+
+            foreach (var occlusion in args.Occlusions)
+            {
+                var rect = occlusion.OccludingRect;
+
+                if (rect.Y <= 0) continue;
+                if (rect.X >= inputRight || rect.X + rect.Width <= inputLeft) continue;
+
+                requiredOffset = Math.Max(requiredOffset, inputBottom + ManualSearchKeyboardGap - rect.Y);
+            }
+
+            ParserSurface.RenderTransform = requiredOffset > 0 ? new TranslateTransform(0, -requiredOffset) : null;
+        }
+
+        private void ManualSearchInputView_Hiding(CoreInputView sender, CoreInputViewHidingEventArgs args)
+        {
+            if (ManualSearchPanel.Visibility != Visibility.Visible) return;
+
+            RestoreInputLanguage();
+
+            if (_manualSearchInputView != null)
+            {
+                _manualSearchInputView.PrimaryViewHiding -= ManualSearchInputView_Hiding;
+                _manualSearchInputView.OcclusionsChanged -= ManualSearchInputView_OcclusionsChanged;
+                _manualSearchInputView = null;
+            }
+
+            ParserSurface.RenderTransform = null;
+            ManualSearchPanel.Visibility = Visibility.Collapsed;
+
+            if (_manualSearchFromNoMatches)
+            {
+                _manualSearchFromNoMatches = false;
+                Close();
+                return;
+            }
+
+            GamesListBox.Visibility = Visibility.Visible;
+            _mainWindow.SetHintsMode(HintPanel.HintMode.ParserGames);
+
+            if (_gameResults.Count > 0 && GamesListBox.SelectedIndex < 0)
+                GamesListBox.SelectedIndex = 0;
+
+            GamesListBox.Focus();
+        }
+
+        private async Task SearchCurrentGameAsync(string customQuery, CancellationToken cancellationToken)
+        {
+            if (!IsSessionActive(cancellationToken)) return;
+
+            _isBusy = true;
+
+            try
+            {
+                string query = string.IsNullOrWhiteSpace(customQuery)
+                    ? (_shortcut.DisplayName ?? _shortcut.Name)
+                    : customQuery.Trim();
+
+                Task<List<ParserGameResult>> searchTask = _steamGridDbClient.SearchGamesAsync(query, MaxGames, cancellationToken);
+                Task timeoutTask = Task.Delay(TimeSpan.FromSeconds(GameSearchTimeoutSeconds), cancellationToken);
+                Task completedTask = await Task.WhenAny(searchTask, timeoutTask);
+
+                if (completedTask != searchTask)
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                        return;
+
+                    if (!searchTask.IsCompleted)
+                    {
+                        ShowErrorNotification(Locals.GetString("GridDBError"));
+                        return;
+                    }
+                }
+
+                var results = await searchTask;
+
+                if (!IsSessionActive(cancellationToken)) return;
+
+                _gameResults.Clear();
+
+                foreach (var result in results)
+                    _gameResults.Add(result);
+
+                HideStatus();
+
+                if (_gameResults.Count == 0)
+                {
+                    ShowManualSearch(true, cancellationToken);
+                    return;
+                }
+
+                ShowParserSurface();
+                ManualSearchPanel.Visibility = Visibility.Collapsed;
+                GamesListBox.Visibility = Visibility.Visible;
+                _mainWindow.SetHintsMode(HintPanel.HintMode.ParserGames);
+                GamesListBox.SelectedIndex = 0;
+                GamesListBox.ScrollIntoView(GamesListBox.SelectedItem);
+                GamesListBox.Focus();
+
+                ScheduleParserSelectorUpdate();
+            }
+
+            catch (OperationCanceledException)
+            {
+                // Пользователь закрыл парсер или отменил операцию.
+            }
+
+            catch (SteamGridDbApiKeyMissingException ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB API key is not configured.");
+
+                if (IsSessionActive(cancellationToken))
+                    ShowErrorNotification(Locals.GetString("GridDbApiMiss"));
+            }
+
+            catch (SteamGridDbAuthException ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB authorization failed.");
+
+                if (IsSessionActive(cancellationToken))
+                    ShowErrorNotification(Locals.GetString("GridDbInvalidApi"));
+            }
+
+            catch (Exception ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB game search failed.");
+
+                if (IsSessionActive(cancellationToken))
+                    ShowErrorNotification(Locals.GetString("GridDBError"));
+            }
+
+            finally
+            {
+                if (IsCurrentSession(cancellationToken))
+                    _isBusy = false;
+            }
+        }
+
+        private async void SearchInputBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter) return;
+
+            e.Handled = true;
+
+            string query = SearchInputBox.Text.Trim();
+
+            if (string.IsNullOrWhiteSpace(query)) return;
+
+            SystemProvider.HideSystemKeyboard();
+            RestoreInputLanguage();
+
+            ManualSearchPanel.Visibility = Visibility.Collapsed;
+            HideParserSurface();
+            ParserContentGrid.Visibility = Visibility.Collapsed;
+
+            ShowStatus(Locals.GetString("GridDBSearch"));
+
+            if (_sessionCts == null) return;
+
+            _mainWindow.GetSound()?.PlayLaunchSound();
+            await SearchCurrentGameAsync(query, _sessionCts.Token);
+        }
+
+        private async Task LoadCoversAsync(ParserGameResult game, CancellationToken sessionToken)
+        {
+            if (!IsSessionActive(sessionToken)) return;
+
+            CancelAssetLoading();
+
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
+            _assetLoadCts = cts;
+
+            var cancellationToken = cts.Token;
+
+            _isBusy = true;
+            _mode = ParserMode.Covers;
+
+            UpdateAssetViewportHeight(CoversListBox, CoversVisibleRows, UiScaleKeys.ParserCoverSize);
+
+            _assetGame = game;
+            _backgroundsLoaded = false;
+            _heroResults.Clear();
+
+            AssetTabsPanel.Visibility = Visibility.Visible;
+            BackgroundsListBox.Visibility = Visibility.Collapsed;
+            UpdateAssetTabs();
+
+            _mainWindow.SetHintsMode(HintPanel.HintMode.ParserAssets);
+
+            GamesListBox.Visibility = Visibility.Collapsed;
+            CoversListBox.Visibility = Visibility.Collapsed;
+            CoversListBox.Opacity = 0.45;
+            ScheduleParserSelectorUpdate();
+
+            AssetsProgressBar.Value = 0;
+            AssetsProgressBar.IsIndeterminate = true;
+            AssetsProgressBar.Visibility = Visibility.Visible;
+
+            try
+            {
+                var results = await _steamGridDbClient.GetSquareGridsAsync(game.Id, MaxCovers, cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(sessionToken)) return;
+
+                _gridResults.Clear();
+
+                foreach (var result in results)
+                    _gridResults.Add(result);
+
+                if (_gridResults.Count == 0)
+                {
+                    AssetsProgressBar.IsIndeterminate = false;
+                    AssetsProgressBar.Visibility = Visibility.Collapsed;
+                    CoversListBox.Opacity = 1.0;
+
+                    ShowStatus(Locals.GetString("NoResultsFound"));
+                    return;
+                }
+
+                HideStatus();
+
+                CoversListBox.Visibility = Visibility.Visible;
+
+                UpdateAssetViewportHeight(CoversListBox, CoversVisibleRows, UiScaleKeys.ParserCoverSize);
+
+                CoversListBox.SelectedIndex = 0;
+                CoversListBox.ScrollIntoView(CoversListBox.SelectedItem);
+                CoversListBox.Focus();
+
+                ScheduleParserSelectorUpdate();
+
+                AssetsProgressBar.IsIndeterminate = false;
+                AssetsProgressBar.Minimum = 0;
+                AssetsProgressBar.Maximum = _gridResults.Count;
+                AssetsProgressBar.Value = 0;
+
+                int loadedCount = 0;
+
+                using (var thumbnailSemaphore = new SemaphoreSlim(6, 6))
+                {
+                    var tasks = _gridResults.Select(async grid =>
+                    {
+                        await thumbnailSemaphore.WaitAsync(cancellationToken);
+
+                        try
+                        {
+                            await LoadThumbnailAsync(grid, cancellationToken, 512, 512);
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            int completed = Interlocked.Increment(ref loadedCount);
+
+                            await Dispatcher.InvokeAsync(() =>
+                            {
+                                if (!cancellationToken.IsCancellationRequested)
+                                    AssetsProgressBar.Value = completed;
+                            });
+                        }
+
+                        finally
+                        {
+                            thumbnailSemaphore.Release();
+                        }
+                    });
+
+                    await Task.WhenAll(tasks);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(sessionToken)) return;
+
+                CoversListBox.Opacity = 1.0;
+                AssetsProgressBar.Visibility = Visibility.Collapsed;
+            }
+
+            catch (OperationCanceledException)
+            {
+                // Expected when the user goes back or closes the parser.
+            }
+
+            catch (SteamGridDbApiKeyMissingException ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB API key is not configured.");
+
+                if (IsSessionActive(cancellationToken))
+                    ShowErrorNotification(Locals.GetString("GridDbApiMiss"));
+            }
+
+            catch (SteamGridDbAuthException ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB authorization failed while loading covers.");
+
+                if (IsSessionActive(sessionToken))
+                {
+                    CoversListBox.Opacity = 1.0;
+                    AssetsProgressBar.IsIndeterminate = false;
+                    AssetsProgressBar.Visibility = Visibility.Collapsed;
+
+                    HideParserSurface();
+                    ShowErrorNotification(Locals.GetString("GridDbInvalidApi"));
+                }
+            }
+
+            catch (Exception ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB cover search failed.");
+
+                if (!IsSessionActive(sessionToken)) return;
+
+                CoversListBox.Opacity = 1.0;
+                AssetsProgressBar.IsIndeterminate = false;
+                AssetsProgressBar.Visibility = Visibility.Collapsed;
+
+                HideParserSurface();
+                ShowErrorNotification(Locals.GetString("GridDBError"));
+            }
+
+            finally
+            {
+                if (_assetLoadCts == cts)
+                    _assetLoadCts = null;
+
+                cts.Dispose();
+
+                if (IsCurrentSession(sessionToken))
+                    _isBusy = false;
+            }
+        }
+
+        private async Task LoadBackgroundsAsync(ParserGameResult game, CancellationToken sessionToken)
+        {
+            if (!IsSessionActive(sessionToken)) return;
+
+            CancelAssetLoading();
+
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(sessionToken);
+            _assetLoadCts = cts;
+
+            var cancellationToken = cts.Token;
+
+            _isBusy = true;
+            _mode = ParserMode.Backgrounds;
+
+            UpdateAssetViewportHeight(BackgroundsListBox, BackgroundsVisibleRows, UiScaleKeys.ParserBackgroundHeight);
+
+            UpdateAssetTabs();
+
+            CoversListBox.Visibility = Visibility.Collapsed;
+            BackgroundsListBox.Visibility = Visibility.Collapsed;
+            BackgroundsListBox.Opacity = 0.45;
+            ScheduleParserSelectorUpdate();
+
+            AssetsProgressBar.Value = 0;
+            AssetsProgressBar.IsIndeterminate = true;
+            AssetsProgressBar.Visibility = Visibility.Visible;
+
+            try
+            {
+                var results = await _steamGridDbClient.GetHeroesAsync(game.Id, MaxBackgrounds, 3840, cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(sessionToken)) return;
+
+                _heroResults.Clear();
+
+                foreach (var result in results)
+                    _heroResults.Add(result);
+
+                _backgroundsLoaded = true;
+
+                if (_heroResults.Count == 0)
+                {
+                    AssetsProgressBar.IsIndeterminate = false;
+                    AssetsProgressBar.Visibility = Visibility.Collapsed;
+                    BackgroundsListBox.Opacity = 1.0;
+
+                    ShowStatus(Locals.GetString("NoResultsFound"));
+                    return;
+                }
+
+                HideStatus();
+
+                BackgroundsListBox.Visibility = Visibility.Visible;
+
+                UpdateAssetViewportHeight(BackgroundsListBox, BackgroundsVisibleRows, UiScaleKeys.ParserBackgroundHeight);
+
+                BackgroundsListBox.SelectedIndex = 0;
+                BackgroundsListBox.ScrollIntoView(BackgroundsListBox.SelectedItem);
+                BackgroundsListBox.Focus();
+
+                ScheduleParserSelectorUpdate();
+
+                AssetsProgressBar.IsIndeterminate = false;
+                AssetsProgressBar.Minimum = 0;
+                AssetsProgressBar.Maximum = _heroResults.Count;
+                AssetsProgressBar.Value = 0;
+
+                int loadedCount = 0;
+
+                using (var thumbnailSemaphore = new SemaphoreSlim(6, 6))
+                {
+                    var tasks = _heroResults.Select(async hero =>
+                    {
+                        await thumbnailSemaphore.WaitAsync(cancellationToken);
+
+                        try
+                        {
+                            await LoadThumbnailAsync(hero, cancellationToken, 768);
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            int completed = Interlocked.Increment(ref loadedCount);
+
+                            await Dispatcher.InvokeAsync(() =>
+                            {
+                                if (!cancellationToken.IsCancellationRequested)
+                                    AssetsProgressBar.Value = completed;
+                            });
+                        }
+
+                        finally
+                        {
+                            thumbnailSemaphore.Release();
+                        }
+                    });
+
+                    await Task.WhenAll(tasks);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(sessionToken)) return;
+
+                BackgroundsListBox.Opacity = 1.0;
+                AssetsProgressBar.Visibility = Visibility.Collapsed;
+            }
+
+            catch (OperationCanceledException)
+            {
+                // Expected when the user goes back or closes the parser.
+            }
+
+            catch (SteamGridDbApiKeyMissingException ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB API key is not configured.");
+
+                if (IsSessionActive(cancellationToken))
+                    ShowErrorNotification(Locals.GetString("GridDbApiMiss"));
+            }
+
+            catch (SteamGridDbAuthException ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB authorization failed while loading backgrounds.");
+
+                if (IsSessionActive(sessionToken))
+                {
+                    BackgroundsListBox.Opacity = 1.0;
+                    AssetsProgressBar.IsIndeterminate = false;
+                    AssetsProgressBar.Visibility = Visibility.Collapsed;
+
+                    HideParserSurface();
+                    ShowErrorNotification(Locals.GetString("GridDbInvalidApi"));
+                }
+            }
+
+            catch (Exception ex)
+            {
+                DebugLog.Error("Parser", ex, "SteamGridDB background search failed.");
+
+                if (!IsSessionActive(sessionToken)) return;
+
+                BackgroundsListBox.Opacity = 1.0;
+                AssetsProgressBar.IsIndeterminate = false;
+                AssetsProgressBar.Visibility = Visibility.Collapsed;
+
+                HideParserSurface();
+                ShowErrorNotification(Locals.GetString("GridDBError"));
+            }
+
+            finally
+            {
+                if (_assetLoadCts == cts)
+                    _assetLoadCts = null;
+
+                cts.Dispose();
+
+                if (IsCurrentSession(sessionToken))
+                    _isBusy = false;
+            }
+        }
+
+        private async Task LoadThumbnailAsync(ParserGridResult result, CancellationToken cancellationToken, int decodePixelWidth, int decodePixelHeight = 0)
+        {
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                byte[] bytes = await _steamGridDbClient.DownloadImageAsync(result.Thumb, cancellationToken);
+
+                using (var stream = new MemoryStream(bytes))
+                {
+                    var bitmap = new BitmapImage();
+
+                    bitmap.BeginInit();
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.DecodePixelWidth = decodePixelWidth;
+
+                    if (decodePixelHeight > 0)
+                        bitmap.DecodePixelHeight = decodePixelHeight;
+
+                    bitmap.StreamSource = stream;
+                    bitmap.EndInit();
+                    bitmap.Freeze();
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    result.ImageSource = bitmap;
+                }
+            }
+
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+
+            catch
+            {
+                // A broken thumbnail must not cancel the remaining downloads.
+            }
+        }
+
+        private async Task DownloadCoverAsync(ParserGridResult cover, CancellationToken cancellationToken)
+        {
+            _isBusy = true;
+            string coverTempPath = null;
+
+            AssetsProgressBar.Value = 0;
+            AssetsProgressBar.IsIndeterminate = true;
+            AssetsProgressBar.Visibility = Visibility.Visible;
+
+            try
+            {
+                byte[] bytes = await _steamGridDbClient.DownloadImageAsync(cover.Url, cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(cancellationToken)) return;
+
+                string coversDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shortcuts", "covers");
+
+                Directory.CreateDirectory(coversDirectory);
+
+                // Use the actual shortcut name instead of DisplayName.
+                string coverPath = Path.Combine(coversDirectory, _shortcut.Name + ".png");
+                coverTempPath = Path.Combine(coversDirectory, _shortcut.Name + "." + Guid.NewGuid().ToString("N") + ".tmp");
+
+                using (var input = new MemoryStream(bytes))
+                using (var sourceImage = Drawing.Image.FromStream(input, true, true))
+                using (var resizedImage = new Drawing.Bitmap(512, 512, DrawingImaging.PixelFormat.Format32bppArgb))
+                {
+                    using (var graphics = Drawing.Graphics.FromImage(resizedImage))
+                    {
+                        graphics.Clear(Drawing.Color.Transparent);
+                        graphics.CompositingQuality = Drawing2D.CompositingQuality.HighQuality;
+                        graphics.InterpolationMode = Drawing2D.InterpolationMode.HighQualityBicubic;
+                        graphics.SmoothingMode = Drawing2D.SmoothingMode.HighQuality;
+                        graphics.PixelOffsetMode = Drawing2D.PixelOffsetMode.HighQuality;
+
+                        float sourceSize = Math.Min(sourceImage.Width, sourceImage.Height);
+                        float sourceX = (sourceImage.Width - sourceSize) / 2f;
+                        float sourceY = (sourceImage.Height - sourceSize) / 2f;
+
+                        var destRect = new Drawing.RectangleF(0, 0, 512, 512);
+                        var sourceRect = new Drawing.RectangleF(sourceX, sourceY, sourceSize, sourceSize);
+
+                        graphics.DrawImage(sourceImage, destRect, sourceRect, Drawing.GraphicsUnit.Pixel);
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    using (var output = new FileStream(coverTempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        resizedImage.Save(output, DrawingImaging.ImageFormat.Png);
+                    }
+
+                    using (var verifyStream = new FileStream(coverTempPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var verifyImage = Drawing.Image.FromStream(verifyStream, true, true))
+                    {
+                        if (verifyImage.Width != 512 || verifyImage.Height != 512)
+                            throw new InvalidDataException("Saved cover has invalid dimensions.");
+                    }
+
+                    if (File.Exists(coverPath))
+                        File.Replace(coverTempPath, coverPath, null);
+                    else
+                        File.Move(coverTempPath, coverPath);
+
+                    coverTempPath = null;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(cancellationToken)) return;
+
+                _mainWindow.GetLauncher()?.RefreshSelectedCover();
+
+                Close();
+            }
+
+            catch (OperationCanceledException)
+            {
+                // Expected when the parser is closed during download.
+            }
+
+            catch (Exception ex)
+            {
+                DebugLog.Error("Parser", ex, "Failed to download or save cover.");
+
+                if (IsSessionActive(cancellationToken))
+                {
+                    CoversListBox.Visibility = Visibility.Visible;
+                    ShowStatus(Locals.GetString("ParserOperationError") + ": " + ex.Message);
+                }
+            }
+
+            finally
+            {
+                AssetsProgressBar.IsIndeterminate = false;
+                AssetsProgressBar.Visibility = Visibility.Collapsed;
+                AssetsProgressBar.Value = 0;
+
+                if (coverTempPath != null)
+                {
+                    try
+                    {
+                        if (File.Exists(coverTempPath))
+                            File.Delete(coverTempPath);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                if (IsCurrentSession(cancellationToken))
+                    _isBusy = false;
+            }
+        }
+
+        private async Task DownloadBackgroundAsync(ParserGridResult background, CancellationToken cancellationToken)
+        {
+            _isBusy = true;
+
+            AssetsProgressBar.Value = 0;
+            AssetsProgressBar.IsIndeterminate = true;
+            AssetsProgressBar.Visibility = Visibility.Visible;
+
+            string tempPath = null;
+
+            try
+            {
+                byte[] bytes = await _steamGridDbClient.DownloadImageAsync(background.Url, cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(cancellationToken)) return;
+
+                string extension;
+
+                using (var input = new MemoryStream(bytes))
+                using (var sourceImage = Drawing.Image.FromStream(input, true, true))
+                {
+                    if (sourceImage.Width < 3840)
+                        throw new InvalidDataException($"Background width is only {sourceImage.Width}px. Minimum required width is 3840px.");
+
+                    extension = sourceImage.RawFormat.Guid == DrawingImaging.ImageFormat.Png.Guid ? ".png" : ".jpg";
+                }
+
+                string backgroundsDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shortcuts", "backgrounds");
+
+                Directory.CreateDirectory(backgroundsDirectory);
+
+                string backgroundPath = Path.Combine(backgroundsDirectory, _shortcut.Name + extension);
+                tempPath = Path.Combine(backgroundsDirectory, _shortcut.Name + "." + Guid.NewGuid().ToString("N") + ".tmp");
+
+                if (File.Exists(tempPath))
+                    File.Delete(tempPath);
+
+                using (var verifyStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var verifyImage = Drawing.Image.FromStream(verifyStream, true, true))
+                {
+                    if (verifyImage.Width < 3840)
+                        throw new InvalidDataException("Saved background has invalid dimensions.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (File.Exists(backgroundPath))
+                    File.Replace(tempPath, backgroundPath, null);
+                else
+                    File.Move(tempPath, backgroundPath);
+
+                tempPath = null;
+
+                string[] extensions = { ".png", ".jpg", ".jpeg" };
+
+                foreach (string oldExtension in extensions)
+                {
+                    string oldPath = Path.Combine(backgroundsDirectory, _shortcut.Name + oldExtension);
+
+                    if (!string.Equals(oldPath, backgroundPath, StringComparison.OrdinalIgnoreCase) && File.Exists(oldPath))
+                    {
+                        try
+                        {
+                            File.Delete(oldPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            DebugLog.Error("Parser", ex, $"Failed to remove old background '{oldPath}'.");
+                        }
+                    }
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!IsSessionActive(cancellationToken)) return;
+
+                _mainWindow.InvalidateBackgroundCache(_shortcut.FullPath);
+                _mainWindow.RefreshSelectedBackground();
+
+                Close();
+            }
+
+            catch (OperationCanceledException)
+            {
+                // Expected when the parser is closed during download.
+            }
+
+            catch (Exception ex)
+            {
+                DebugLog.Error("Parser", ex, "Failed to download or save background.");
+
+                if (IsSessionActive(cancellationToken))
+                {
+                    BackgroundsListBox.Visibility = Visibility.Visible;
+                    ShowStatus(Locals.GetString("ParserOperationError") + ": " + ex.Message);
+                }
+            }
+
+            finally
+            {
+                AssetsProgressBar.IsIndeterminate = false;
+                AssetsProgressBar.Visibility = Visibility.Collapsed;
+                AssetsProgressBar.Value = 0;
+
+                if (tempPath != null)
+                {
+                    try
+                    {
+                        if (File.Exists(tempPath))
+                            File.Delete(tempPath);
+                    }
+
+                    catch
+                    {
+                    }
+                }
+
+                if (IsCurrentSession(cancellationToken))
+                    _isBusy = false;
+            }
+        }
+
+        private void ShowStatus(string text)
+        {
+            _statusTimer.Stop();
+
+            StatusText.Text = text;
+            ParserStatusSurface.Visibility = Visibility.Visible;
+            StatusText.Visibility = Visibility.Visible;
+
+            _statusTimer.Start();
+        }
+
+        private void HideStatus()
+        {
+            _statusTimer.Stop();
+
+            StatusText.Visibility = Visibility.Collapsed;
+            ParserStatusSurface.Visibility = Visibility.Collapsed;
+        }
+
+        private void ShowErrorNotification(string text)
+        {
+            _mainWindow.ShowParserErrorNotification(text);
+            Close();
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+
+            _disposed = true;
+
+            CancelSession();
+            CancelAssetLoading();
+            _statusTimer.Stop();
+
+            if (_manualSearchInputView != null)
+            {
+                _manualSearchInputView.PrimaryViewHiding -= ManualSearchInputView_Hiding;
+                _manualSearchInputView.OcclusionsChanged -= ManualSearchInputView_OcclusionsChanged;
+                _manualSearchInputView = null;
+            }
+
+            RestoreInputLanguage();
+
+            _steamGridDbClient.Dispose();
+
+            _sessionCts?.Dispose();
+            _sessionCts = null;
+        }
+    }
+
+    public class ParserGameResult
+    {
+        public int Id { get; set; }
+        public string Name { get; set; }
+
+        public string DisplayText => $"{Name} (ID: {Id})";
+    }
+
+    public class ParserGridResult : INotifyPropertyChanged
+    {
+        private ImageSource _imageSource;
+
+        public int Id { get; set; }
+        public string Url { get; set; }
+        public string Thumb { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+
+        public ImageSource ImageSource
+        {
+            get => _imageSource;
+            set
+            {
+                _imageSource = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ImageSource)));
+            }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+    }
+}
