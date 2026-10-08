@@ -49,7 +49,10 @@
                         CacheMode="BitmapCache">
 
                         <Image.RenderTransform>
-                            <TranslateTransform x:Name="BackgroundPreviousTranslate"/>
+                            <TransformGroup>
+                                <TranslateTransform x:Name="BackgroundPreviousTranslate"/>
+                                <TranslateTransform x:Name="BackgroundPreviousSlide"/>
+                            </TransformGroup>
                         </Image.RenderTransform>
 
                     </Image>
@@ -62,7 +65,10 @@
                         CacheMode="BitmapCache">
 
                         <Image.RenderTransform>
-                            <TranslateTransform x:Name="BackgroundTranslate"/>
+                            <TransformGroup>
+                                <TranslateTransform x:Name="BackgroundTranslate"/>
+                                <TranslateTransform x:Name="BackgroundSlide"/>
+                            </TransformGroup>
                         </Image.RenderTransform>
 
                     </Image>

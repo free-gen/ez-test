@@ -1547,10 +1547,13 @@ namespace EZ2Play.App
                 string backgroundPath = Path.Combine(backgroundsDirectory, _shortcut.Name + extension);
                 tempPath = Path.Combine(backgroundsDirectory, _shortcut.Name + "." + Guid.NewGuid().ToString("N") + ".tmp");
 
-                if (File.Exists(tempPath))
-                    File.Delete(tempPath);
+                using (var output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    output.Write(bytes, 0, bytes.Length);
+                }
 
                 using (var verifyStream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                
                 using (var verifyImage = Drawing.Image.FromStream(verifyStream, true, true))
                 {
                     if (verifyImage.Width < 3840)

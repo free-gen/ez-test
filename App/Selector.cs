@@ -189,9 +189,11 @@ namespace EZ2Play.App
             _isRenderingHooked = false;
         }
 
-        private void OnTargetVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+        private void OnTargetVisibilityChanged(
+            object sender, DependencyPropertyChangedEventArgs e)
         {
             UpdateTargetBounds();
+            InvalidateVisual();
         }
 
         private void OnTargetUnloaded(object sender, RoutedEventArgs e)
@@ -340,6 +342,7 @@ namespace EZ2Play.App
 
             if (_target == null ||
                 _profile == null ||
+                _targetBounds.IsEmpty ||
                 !_target.IsVisible ||
                 ActualWidth <= 0 ||
                 ActualHeight <= 0)
@@ -392,6 +395,11 @@ namespace EZ2Play.App
             }
             catch (InvalidOperationException)
             {
+                if (!_targetBounds.IsEmpty)
+                {
+                    _targetBounds = Rect.Empty;
+                    InvalidateVisual();
+                }
             }
         }
 
