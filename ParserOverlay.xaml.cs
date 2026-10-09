@@ -86,26 +86,33 @@ namespace EZ2Play.App
             double maxWidth = 0;
             double maxHeight = 0;
 
-            foreach (UIElement child in InternalChildren)
-            {
-                child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            bool infiniteWidth = double.IsInfinity(availableSize.Width);
 
-                maxWidth = Math.Max(maxWidth, child.DesiredSize.Width);
-                maxHeight = Math.Max(maxHeight, child.DesiredSize.Height);
+            // Natural width is needed only when the parent provides no width limit.
+            if (infiniteWidth)
+            {
+                foreach (UIElement child in InternalChildren)
+                {
+                    child.Measure(new Size(
+                        double.PositiveInfinity,
+                        double.PositiveInfinity));
+
+                    maxWidth = Math.Max(maxWidth, child.DesiredSize.Width);
+                }
             }
 
-            double cellWidth = double.IsInfinity(availableSize.Width)
+            double cellWidth = infiniteWidth
                 ? maxWidth
-                : Math.Max(0, (availableSize.Width - horizontalGap * (columns - 1)) / columns);
+                : Math.Max(0,
+                    (availableSize.Width - horizontalGap * (columns - 1)) / columns);
 
+            // Measure each item using its actual column width.
             foreach (UIElement child in InternalChildren)
             {
                 child.Measure(new Size(cellWidth, double.PositiveInfinity));
-            }
 
-            maxHeight = InternalChildren
-                .Cast<UIElement>()
-                .Max(child => child.DesiredSize.Height);
+                maxHeight = Math.Max(maxHeight, child.DesiredSize.Height);
+            }
 
             _layoutCellHeight = Math.Ceiling(maxHeight);
             _layoutVerticalGap = Math.Ceiling(verticalGap);
@@ -416,31 +423,23 @@ namespace EZ2Play.App
 
         private void UpdateAssetViewportHeight(ListBox listBox, int visibleRows, string mediaHeightKey)
         {
-            listBox.ApplyTemplate();
-            listBox.UpdateLayout();
+            double itemHeight = Math.Ceiling((double)FindResource(mediaHeightKey));
 
-            ParserAssetsPanel panel = FindVisualChild<ParserAssetsPanel>(listBox);
+            Thickness gap = (Thickness)FindResource(UiScaleKeys.ParserAssetsGap);
+            double verticalGap = Math.Ceiling(gap.Top + gap.Bottom);
 
-            double mediaHeight = (double)FindResource(mediaHeightKey);
-            double fallbackItemHeight = mediaHeight;
-            double contentHeight;
-
-            if (panel != null)
-            {
-                contentHeight = panel.GetViewportHeight(visibleRows, fallbackItemHeight);
-            }
-            else
-            {
-                Thickness gap = (Thickness)FindResource(UiScaleKeys.ParserAssetsGap);
-
-                double verticalGap = gap.Top + gap.Bottom;
-
-                contentHeight = Math.Ceiling(fallbackItemHeight * visibleRows + verticalGap * Math.Max(0, visibleRows - 1));
-            }
+            double contentHeight = Math.Ceiling(
+                itemHeight * visibleRows +
+                verticalGap * Math.Max(0, visibleRows - 1));
 
             double outerMargin = listBox.Margin.Top + listBox.Margin.Bottom;
+            double targetHeight = Math.Ceiling(contentHeight + outerMargin);
 
-            ParserContentGrid.Height = Math.Ceiling(contentHeight + outerMargin);
+            if (double.IsNaN(ParserContentGrid.Height) ||
+                Math.Abs(ParserContentGrid.Height - targetHeight) > 0.01)
+            {
+                ParserContentGrid.Height = targetHeight;
+            }
         }
 
         public async void Open()
@@ -1132,6 +1131,7 @@ namespace EZ2Play.App
                 AssetsProgressBar.Value = 0;
 
                 int loadedCount = 0;
+                int totalThumbnails = _gridResults.Count;
 
                 using (var thumbnailSemaphore = new SemaphoreSlim(6, 6))
                 {
@@ -1146,11 +1146,17 @@ namespace EZ2Play.App
 
                             int completed = Interlocked.Increment(ref loadedCount);
 
-                            await Dispatcher.InvokeAsync(() =>
+                            if (completed % 4 == 0 || completed == totalThumbnails)
                             {
-                                if (!cancellationToken.IsCancellationRequested)
-                                    AssetsProgressBar.Value = completed;
-                            });
+                                await Dispatcher.InvokeAsync(() =>
+                                {
+                                    if (!cancellationToken.IsCancellationRequested &&
+                                        ReferenceEquals(_assetLoadCts, cts))
+                                    {
+                                        AssetsProgressBar.Value = completed;
+                                    }
+                                });
+                            }
                         }
 
                         finally
@@ -1300,6 +1306,7 @@ namespace EZ2Play.App
                 AssetsProgressBar.Value = 0;
 
                 int loadedCount = 0;
+                int totalThumbnails = _gridResults.Count;
 
                 using (var thumbnailSemaphore = new SemaphoreSlim(6, 6))
                 {
@@ -1314,11 +1321,17 @@ namespace EZ2Play.App
 
                             int completed = Interlocked.Increment(ref loadedCount);
 
-                            await Dispatcher.InvokeAsync(() =>
+                            if (completed % 4 == 0 || completed == totalThumbnails)
                             {
-                                if (!cancellationToken.IsCancellationRequested)
-                                    AssetsProgressBar.Value = completed;
-                            });
+                                await Dispatcher.InvokeAsync(() =>
+                                {
+                                    if (!cancellationToken.IsCancellationRequested &&
+                                        ReferenceEquals(_assetLoadCts, cts))
+                                    {
+                                        AssetsProgressBar.Value = completed;
+                                    }
+                                });
+                            }
                         }
 
                         finally

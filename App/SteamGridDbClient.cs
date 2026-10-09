@@ -137,7 +137,7 @@ namespace EZ2Play.App
                     while ((bytesRead = await input.ReadAsync(
                         buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
                     {
-                        if (bytesRead > MaxImageBytes - totalBytes)
+                        if (bytesRead > maxBytes - totalBytes)
                             throw new InvalidDataException("Image exceeds the download limit.");
 
                         output.Write(buffer, 0, bytesRead);
