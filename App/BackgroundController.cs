@@ -39,6 +39,7 @@ namespace EZ2Play.App
         private int _backgroundRequestId;
         private int _lifecycleGeneration;
         private int _backgroundTransitionGeneration;
+        private bool _backgroundTransitionInProgress;
         private bool _disposed;
 
         private readonly Dictionary<string, BitmapImage> _backgroundCache =
@@ -106,6 +107,7 @@ namespace EZ2Play.App
             ++_backgroundRequestId;
             ++_lifecycleGeneration;
             ++_backgroundTransitionGeneration;
+            _backgroundTransitionInProgress = false;
 
             _pendingShortcutPath = null;
             _pendingRequestId = 0;
@@ -268,6 +270,15 @@ namespace EZ2Play.App
             _pendingRequestId = requestId;
             _pendingLifecycleGeneration = lifecycleGeneration;
 
+            StartPendingBackgroundQueue();
+        }
+
+        private void StartPendingBackgroundQueue()
+        {
+            if (_disposed || !_isActive || _backgroundTransitionInProgress ||
+                _pendingShortcutPath == null)
+                return;
+
             if (_backgroundWorkerTask == null || _backgroundWorkerTask.IsCompleted)
                 _backgroundWorkerTask = ProcessBackgroundQueueAsync();
         }
@@ -276,6 +287,9 @@ namespace EZ2Play.App
         {
             while (!_disposed)
             {
+                if (_backgroundTransitionInProgress)
+                    return;
+
                 string shortcutPath = _pendingShortcutPath;
                 int direction = _pendingDirection;
                 int decodePixelHeight = _pendingDecodePixelHeight;
@@ -349,6 +363,7 @@ namespace EZ2Play.App
             }
 
             int transitionGeneration = ++_backgroundTransitionGeneration;
+            _backgroundTransitionInProgress = true;
 
             ResetSlides();
 
@@ -427,9 +442,16 @@ namespace EZ2Play.App
                 if (_disposed || transitionGeneration != _backgroundTransitionGeneration)
                     return;
 
-                if (ImageSlide == null) return;
-                ImageSlide.BeginAnimation(TranslateTransform.XProperty, null);
-                ImageSlide.X = 0;
+                if (ImageSlide != null)
+                {
+                    ImageSlide.BeginAnimation(TranslateTransform.XProperty, null);
+                    ImageSlide.X = 0;
+                }
+
+                ClearPrevious();
+                _backgroundTransitionInProgress = false;
+
+                StartPendingBackgroundQueue();
             };
 
             PreviousSlide.BeginAnimation(TranslateTransform.XProperty, previousSlide);
@@ -442,6 +464,8 @@ namespace EZ2Play.App
         private void FadeToParticles()
         {
             int transitionGeneration = ++_backgroundTransitionGeneration;
+            _backgroundTransitionInProgress = true;
+
             ClearPrevious();
 
             ResetSlides();
@@ -466,10 +490,14 @@ namespace EZ2Play.App
                     return;
 
                 StopPan();
+                
                 _image.BeginAnimation(UIElement.OpacityProperty, null);
                 _image.Source = null;
                 _image.Visibility = Visibility.Collapsed;
                 _image.Opacity = 0;
+
+                _backgroundTransitionInProgress = false;
+                StartPendingBackgroundQueue();
             };
 
             _image.BeginAnimation(UIElement.OpacityProperty, fadeOut);
@@ -477,7 +505,8 @@ namespace EZ2Play.App
 
         private void FadeFromParticles(BitmapImage nextBitmap)
         {
-            ++_backgroundTransitionGeneration;
+            int transitionGeneration = ++_backgroundTransitionGeneration;
+            _backgroundTransitionInProgress = true;
 
             ResetSlides();
 
@@ -501,6 +530,16 @@ namespace EZ2Play.App
                 To = BackgroundOpacity,
                 Duration = TimeSpan.FromSeconds(BackgroundTransitionDuration),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut }
+            };
+
+            fadeIn.Completed += (s, e) =>
+            {
+                if (_disposed ||
+                    transitionGeneration != _backgroundTransitionGeneration)
+                    return;
+
+                _backgroundTransitionInProgress = false;
+                StartPendingBackgroundQueue();
             };
 
             _image.BeginAnimation(UIElement.OpacityProperty, fadeIn);
@@ -676,12 +715,16 @@ namespace EZ2Play.App
             {
                 ++_lifecycleGeneration;
                 ++_backgroundTransitionGeneration;
+                _backgroundTransitionInProgress = false;
                 _pendingShortcutPath = null;
                 _pendingRequestId = 0;
                 _pendingLifecycleGeneration = 0;
                 _panStartTimer.Stop();
                 ClearPrevious();
             }
+
+            if (visible && _backgroundTransitionInProgress)
+                return;
 
             if (UseImageBackground)
             {
@@ -735,6 +778,7 @@ namespace EZ2Play.App
                 return;
 
             _disposed = true;
+            _backgroundTransitionInProgress = false;
             ++_backgroundRequestId;
             ++_lifecycleGeneration;
             ++_backgroundTransitionGeneration;

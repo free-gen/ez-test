@@ -111,9 +111,6 @@ namespace EZ2Play.App
 
             _carouselWrapper.IsHitTestVisible = false;
 
-            if (_carouselWrapper.CacheMode == null)
-                _carouselWrapper.CacheMode = new BitmapCache();
-
             try
             {
                 transform.X = _getWindowWidth() * 0.05 * direction;
@@ -167,7 +164,6 @@ namespace EZ2Play.App
 
                 _carouselWrapper.Opacity = 1;
                 transform.X = 0;
-                _carouselWrapper.CacheMode = null;
                 _carouselWrapper.IsHitTestVisible = true;
             }
         }

@@ -52,6 +52,11 @@ namespace EZ2Play.App
             _audio = audio;
             _isXboxGameBarInstalled = SystemProvider.IsXboxGameBarInstalled();
 
+            // Game Bar owns the Guide button when installed.
+            // No polling is needed in this mode.
+            if (_isXboxGameBarInstalled)
+                return;
+
             _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(16) };
             _timer.Tick += Poll;
             _timer.Start();

@@ -45,8 +45,7 @@
                         Stretch="Fill"
                         Opacity="0"
                         Visibility="Collapsed"
-                        RenderOptions.BitmapScalingMode="HighQuality"
-                        CacheMode="BitmapCache">
+                        RenderOptions.BitmapScalingMode="HighQuality">
 
                         <Image.RenderTransform>
                             <TransformGroup>
