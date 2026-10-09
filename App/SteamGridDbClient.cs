@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -14,6 +15,7 @@ namespace EZ2Play.App
     {
         private const string WorkerBaseUrl = "https://ez2play.free-gen.workers.dev/api/v2";
         private const string DirectBaseUrl = "https://www.steamgriddb.com/api/v2";
+        private const int MaxImageBytes = 48 * 1024 * 1024;
 
         private readonly HttpClient _workerClient;
         private readonly HttpClient _directApiClient;
@@ -107,14 +109,41 @@ namespace EZ2Play.App
 
         public async Task<byte[]> DownloadImageAsync(string url, CancellationToken cancellationToken)
         {
-            using (var response = await _imageClient.GetAsync(url, cancellationToken))
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using (var response = await _imageClient.GetAsync(
+                url,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken).ConfigureAwait(false))
             {
                 response.EnsureSuccessStatusCode();
 
-                byte[] bytes = await response.Content.ReadAsByteArrayAsync();
-                cancellationToken.ThrowIfCancellationRequested();
+                long? contentLength = response.Content.Headers.ContentLength;
 
-                return bytes;
+                if (contentLength.HasValue && contentLength.Value > MaxImageBytes)
+                    throw new InvalidDataException("Image exceeds the 48 MiB download limit.");
+
+                using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                using (var output = new MemoryStream())
+                {
+                    byte[] buffer = new byte[64 * 1024];
+                    int bytesRead;
+                    int totalBytes = 0;
+
+                    while ((bytesRead = await input.ReadAsync(
+                        buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                    {
+                        if (bytesRead > MaxImageBytes - totalBytes)
+                            throw new InvalidDataException("Image exceeds the 48 MiB download limit.");
+
+                        output.Write(buffer, 0, bytesRead);
+                        totalBytes += bytesRead;
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    return output.ToArray();
+                }
             }
         }
 

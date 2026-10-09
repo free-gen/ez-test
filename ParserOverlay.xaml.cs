@@ -1176,8 +1176,12 @@ namespace EZ2Play.App
             {
                 DebugLog.Error("Parser", ex, "SteamGridDB API key is not configured.");
 
-                if (IsSessionActive(cancellationToken))
+                if (IsSessionActive(sessionToken) &&
+                    ReferenceEquals(_assetLoadCts, cts) &&
+                    !cancellationToken.IsCancellationRequested)
+                {
                     ShowErrorNotification(Locals.GetString("GridDbApiMiss"));
+                }
             }
 
             catch (SteamGridDbAuthException ex)
@@ -1211,12 +1215,14 @@ namespace EZ2Play.App
 
             finally
             {
-                if (_assetLoadCts == cts)
+                bool isCurrentLoad = ReferenceEquals(_assetLoadCts, cts);
+
+                if (isCurrentLoad)
                     _assetLoadCts = null;
 
                 cts.Dispose();
 
-                if (IsCurrentSession(sessionToken))
+                if (isCurrentLoad && IsCurrentSession(sessionToken))
                     _isBusy = false;
             }
         }
@@ -1338,8 +1344,12 @@ namespace EZ2Play.App
             {
                 DebugLog.Error("Parser", ex, "SteamGridDB API key is not configured.");
 
-                if (IsSessionActive(cancellationToken))
+                if (IsSessionActive(sessionToken) &&
+                    ReferenceEquals(_assetLoadCts, cts) &&
+                    !cancellationToken.IsCancellationRequested)
+                {
                     ShowErrorNotification(Locals.GetString("GridDbApiMiss"));
+                }
             }
 
             catch (SteamGridDbAuthException ex)
@@ -1373,53 +1383,67 @@ namespace EZ2Play.App
 
             finally
             {
-                if (_assetLoadCts == cts)
+                bool isCurrentLoad = ReferenceEquals(_assetLoadCts, cts);
+
+                if (isCurrentLoad)
                     _assetLoadCts = null;
 
                 cts.Dispose();
 
-                if (IsCurrentSession(sessionToken))
+                if (isCurrentLoad && IsCurrentSession(sessionToken))
                     _isBusy = false;
             }
         }
 
-        private async Task LoadThumbnailAsync(ParserGridResult result, CancellationToken cancellationToken, int decodePixelWidth, int decodePixelHeight = 0)
+        private async Task LoadThumbnailAsync(ParserGridResult result, CancellationToken cancellationToken,
+            int decodePixelWidth, int decodePixelHeight = 0)
         {
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                byte[] bytes = await _steamGridDbClient.DownloadImageAsync(result.Thumb, cancellationToken);
+                byte[] bytes = await _steamGridDbClient.DownloadImageAsync(
+                    result.Thumb, cancellationToken);
 
-                using (var stream = new MemoryStream(bytes))
+                cancellationToken.ThrowIfCancellationRequested();
+
+                BitmapImage bitmap = await Task.Run(() =>
                 {
-                    var bitmap = new BitmapImage();
-
-                    bitmap.BeginInit();
-                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                    bitmap.DecodePixelWidth = decodePixelWidth;
-
-                    if (decodePixelHeight > 0)
-                        bitmap.DecodePixelHeight = decodePixelHeight;
-
-                    bitmap.StreamSource = stream;
-                    bitmap.EndInit();
-                    bitmap.Freeze();
-
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    result.ImageSource = bitmap;
-                }
-            }
+                    using (var stream = new MemoryStream(bytes))
+                    {
+                        var image = new BitmapImage();
 
+                        image.BeginInit();
+                        image.CacheOption = BitmapCacheOption.OnLoad;
+                        image.DecodePixelWidth = decodePixelWidth;
+
+                        if (decodePixelHeight > 0)
+                            image.DecodePixelHeight = decodePixelHeight;
+
+                        image.StreamSource = stream;
+                        image.EndInit();
+                        image.Freeze();
+
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        return image;
+                    }
+                }, cancellationToken);
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Возвращаемся на UI-поток для обновления привязки.
+                result.ImageSource = bitmap;
+            }
             catch (OperationCanceledException)
             {
                 throw;
             }
-
             catch
             {
-                // A broken thumbnail must not cancel the remaining downloads.
+                // Ошибка одной миниатюры не отменяет остальные.
             }
         }
 
@@ -1440,13 +1464,17 @@ namespace EZ2Play.App
 
                 if (!IsSessionActive(cancellationToken)) return;
 
-                string coversDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shortcuts", "covers");
+                string shortcutName = _shortcut.Name;
+
+                await Task.Run(() =>
+                {
+                    string coversDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shortcuts", "covers");
 
                 Directory.CreateDirectory(coversDirectory);
 
                 // Use the actual shortcut name instead of DisplayName.
-                string coverPath = Path.Combine(coversDirectory, _shortcut.Name + ".png");
-                coverTempPath = Path.Combine(coversDirectory, _shortcut.Name + "." + Guid.NewGuid().ToString("N") + ".tmp");
+                string coverPath = Path.Combine(coversDirectory, shortcutName + ".png");
+                coverTempPath = Path.Combine(coversDirectory, shortcutName + "." + Guid.NewGuid().ToString("N") + ".tmp");
 
                 using (var input = new MemoryStream(bytes))
                 using (var sourceImage = Drawing.Image.FromStream(input, true, true))
@@ -1484,15 +1512,18 @@ namespace EZ2Play.App
                             throw new InvalidDataException("Saved cover has invalid dimensions.");
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     if (File.Exists(coverPath))
                         File.Replace(coverTempPath, coverPath, null);
                     else
                         File.Move(coverTempPath, coverPath);
 
                     coverTempPath = null;
-                }
+                    }
+                    }, cancellationToken);
 
-                cancellationToken.ThrowIfCancellationRequested();
+                    cancellationToken.ThrowIfCancellationRequested();
 
                 if (!IsSessionActive(cancellationToken)) return;
 
@@ -1519,9 +1550,12 @@ namespace EZ2Play.App
 
             finally
             {
-                AssetsProgressBar.IsIndeterminate = false;
-                AssetsProgressBar.Visibility = Visibility.Collapsed;
-                AssetsProgressBar.Value = 0;
+                if (IsCurrentSession(cancellationToken))
+                {
+                    AssetsProgressBar.IsIndeterminate = false;
+                    AssetsProgressBar.Visibility = Visibility.Collapsed;
+                    AssetsProgressBar.Value = 0;
+                }
 
                 if (coverTempPath != null)
                 {
@@ -1558,7 +1592,11 @@ namespace EZ2Play.App
 
                 if (!IsSessionActive(cancellationToken)) return;
 
-                string extension;
+                string shortcutName = _shortcut.Name;
+
+                await Task.Run(() =>
+                {
+                    string extension;
 
                 using (var input = new MemoryStream(bytes))
                 using (var sourceImage = Drawing.Image.FromStream(input, true, true))
@@ -1573,8 +1611,8 @@ namespace EZ2Play.App
 
                 Directory.CreateDirectory(backgroundsDirectory);
 
-                string backgroundPath = Path.Combine(backgroundsDirectory, _shortcut.Name + extension);
-                tempPath = Path.Combine(backgroundsDirectory, _shortcut.Name + "." + Guid.NewGuid().ToString("N") + ".tmp");
+                string backgroundPath = Path.Combine(backgroundsDirectory, shortcutName + extension);
+                tempPath = Path.Combine(backgroundsDirectory, shortcutName + "." + Guid.NewGuid().ToString("N") + ".tmp");
 
                 using (var output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
@@ -1602,7 +1640,7 @@ namespace EZ2Play.App
 
                 foreach (string oldExtension in extensions)
                 {
-                    string oldPath = Path.Combine(backgroundsDirectory, _shortcut.Name + oldExtension);
+                    string oldPath = Path.Combine(backgroundsDirectory, shortcutName + oldExtension);
 
                     if (!string.Equals(oldPath, backgroundPath, StringComparison.OrdinalIgnoreCase) && File.Exists(oldPath))
                     {
@@ -1616,12 +1654,13 @@ namespace EZ2Play.App
                         }
                     }
                 }
+            }, cancellationToken);
 
-                cancellationToken.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
 
-                if (!IsSessionActive(cancellationToken)) return;
+                                if (!IsSessionActive(cancellationToken)) return;
 
-                _mainWindow.InvalidateBackgroundCache(_shortcut.FullPath);
+                                _mainWindow.InvalidateBackgroundCache(_shortcut.FullPath);
                 _mainWindow.RefreshSelectedBackground();
 
                 Close();
@@ -1645,9 +1684,12 @@ namespace EZ2Play.App
 
             finally
             {
-                AssetsProgressBar.IsIndeterminate = false;
-                AssetsProgressBar.Visibility = Visibility.Collapsed;
-                AssetsProgressBar.Value = 0;
+                if (IsCurrentSession(cancellationToken))
+                {
+                    AssetsProgressBar.IsIndeterminate = false;
+                    AssetsProgressBar.Visibility = Visibility.Collapsed;
+                    AssetsProgressBar.Value = 0;
+                }
 
                 if (tempPath != null)
                 {

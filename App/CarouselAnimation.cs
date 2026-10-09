@@ -71,7 +71,9 @@ namespace EZ2Play.App
 
             if (previousContainer != null)
             {
-                AnimateSelection(previousContainer, false);
+                var current = listBox.SelectedIndex >= 0 ? listBox.ItemContainerGenerator.ContainerFromIndex(listBox.SelectedIndex) as ListBoxItem : null;
+                if (!ReferenceEquals(previousContainer, current))
+                    AnimateSelection(previousContainer, false);
             }
 
             else if (previousItem != null || fallbackPreviousIndex >= 0)
@@ -156,10 +158,6 @@ namespace EZ2Play.App
             var scale = (ScaleTransform)group.Children[0];
             var translate = (TranslateTransform)group.Children[1];
 
-            // Skip if the selected scale is already applied
-            if (isSelected && Math.Abs(scale.ScaleX - targetScale) < 0.01)
-                return;
-
             var scaleAnimation = new DoubleAnimation
                 {
                     To = targetScale,
@@ -196,14 +194,14 @@ namespace EZ2Play.App
             var scale = (ScaleTransform)group.Children[0];
             var translate = (TranslateTransform)group.Children[1];
 
-            double scaleValue = isSelected ? ScaleFactor : 1.0;
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+            translate.BeginAnimation(TranslateTransform.YProperty, null);
 
+            double scaleValue = isSelected ? ScaleFactor : 1.0;
             scale.ScaleX = scaleValue;
             scale.ScaleY = scaleValue;
-
-            translate.Y = isSelected
-                ? (CarouselLayout.SelectedSize - CarouselLayout.NormalSize) / 2
-                : 0;
+            translate.Y = isSelected ? (CarouselLayout.SelectedSize - CarouselLayout.NormalSize) / 2 : 0;
         }
 
         // Ensure the element has scale and translate transforms
@@ -283,8 +281,10 @@ namespace EZ2Play.App
 
                     // Do not scale down the current selected item
                     if (ReferenceEquals(deferredPrevious, _lastSelectedCarouselItem)) return;
+                    if (listBox.SelectedIndex >= 0 && ReferenceEquals(deferredPrevious, listBox.ItemContainerGenerator.ContainerFromIndex(listBox.SelectedIndex))) return;
 
                     AnimateSelection(deferredPrevious, false);
+                    
                 }), DispatcherPriority.Loaded);
         }
     }
