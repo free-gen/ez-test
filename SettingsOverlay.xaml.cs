@@ -19,6 +19,8 @@ namespace EZ2Play.App
         private bool _isClosing;
         private int _subOptionsSelectedIndex = 0;
         private bool _selectionHandlersAttached;
+        private bool _autorunActionPending;
+        private bool _fpsMonitorActionPending;
 
         public SettingsOverlay(InputHandler inputHandler, MainWindow mainWindow, SelectorCoordinator selectorCoordinator)
         {
@@ -35,7 +37,10 @@ namespace EZ2Play.App
                 SetDescriptionWithIcon(SettingsAutorunAppDesc, "SettingsAutorunAppDesc", "\uE3E3");
 
                 RefreshDisplayList();
-                RefreshAutorunState();
+
+                if (!_autorunActionPending)
+                    RefreshAutorunState();
+
                 RefreshFpsMonitorVisibility();
                 RefreshFpsMonitorState();
 
@@ -204,7 +209,9 @@ namespace EZ2Play.App
                 new Action(UpdateOverlaySelector),
                 DispatcherPriority.Loaded);
 
-            RefreshAutorunState();
+            if (!_autorunActionPending)
+                RefreshAutorunState();
+
             RefreshFpsMonitorVisibility();
             RefreshFpsMonitorState();
             ScheduleUpdateTreeHeaderDivider();
@@ -288,16 +295,34 @@ namespace EZ2Play.App
             FpsMonitorToggle.IsChecked = SystemProvider.IsFpsMonitorRunning();
         }
 
-        private void SetFpsMonitorState(bool enabled)
+        private async void SetFpsMonitorState(bool enabled)
         {
-            bool success = enabled
-                ? SystemProvider.StartFpsMonitor()
-                : SystemProvider.StopFpsMonitor();
+            if (_fpsMonitorActionPending)
+                return;
 
-            if (success)
-                FpsMonitorToggle.IsChecked = enabled;
-            else
+            _fpsMonitorActionPending = true;
+
+            try
+            {
+                bool success = enabled
+                    ? SystemProvider.StartFpsMonitor()
+                    : await System.Threading.Tasks.Task.Run(() 
+                    => SystemProvider.StopFpsMonitor());
+
+                if (success)
+                    FpsMonitorToggle.IsChecked = enabled;
+                else
+                    RefreshFpsMonitorState();
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Error("FPS Monitor", ex, "Failed to change FPS Monitor state.");
                 RefreshFpsMonitorState();
+            }
+            finally
+            {
+                _fpsMonitorActionPending = false;
+            }
         }
 
         private void RefreshAutorunState()
@@ -441,6 +466,11 @@ namespace EZ2Play.App
                 return;
             }
 
+            if (_autorunActionPending &&
+                (SettingsListBox.SelectedItem == TreeItemsContainer ||
+                SettingsListBox.SelectedItem == SettingsAutorunApp))
+                return;
+
             if (SettingsListBox.SelectedItem is ListBoxItem selectedItem &&
                 selectedItem.Visibility != Visibility.Visible)
             {
@@ -505,13 +535,17 @@ namespace EZ2Play.App
             }
         }
 
-        private void SetAutorunState(bool enabled)
+        private async void SetAutorunState(bool enabled)
         {
+            if (_autorunActionPending)
+                return;
+
+            _autorunActionPending = true;
+
             try
             {
-                bool success = enabled
-                    ? SystemProvider.EnableAutorun()
-                    : SystemProvider.DisableAutorun();
+                bool success = await System.Threading.Tasks.Task.Run(() =>
+                    enabled ? SystemProvider.EnableAutorun() : SystemProvider.DisableAutorun());
 
                 if (!success || SystemProvider.IsAutorunEnabled() != enabled)
                 {
@@ -525,43 +559,62 @@ namespace EZ2Play.App
                 _config.Save();
 
                 AutorunToggle.IsChecked = enabled;
-
                 LoadSubOptionsStates();
             }
-
             catch (Exception ex)
             {
                 DebugLog.Error("Autorun", ex, "Failed to change autorun state.");
                 RefreshAutorunState();
             }
+            finally
+            {
+                _autorunActionPending = false;
+            }
         }
 
-        private void UpdateAutorunArguments()
+        private async void UpdateAutorunArguments()
         {
-            string args = " ";
-
-            if (NoSplashToggle.IsChecked.GetValueOrDefault(false))
-                args += "--nosplash ";
-
-            if (NoMusicToggle.IsChecked.GetValueOrDefault(false))
-                args += "--nomusic ";
-
-            if (HotSwapToggle.IsChecked.GetValueOrDefault(false))
-                args += "--hotswap ";
-
-            args = args.TrimEnd();
-
-            bool success = SystemProvider.SetAutorunArguments(args);
-
-            if (!success)
-            {
-                // Restore the UI to the arguments actually stored in the shortcut.
-                LoadSubOptionsStates();
+            if (_autorunActionPending)
                 return;
-            }
 
-            if (AutorunToggle.IsChecked.GetValueOrDefault(false))
-                UpdateSubOptionsVisibility(true);
+            _autorunActionPending = true;
+
+            try
+            {
+                string args = " ";
+
+                if (NoSplashToggle.IsChecked.GetValueOrDefault(false))
+                    args += "--nosplash ";
+
+                if (NoMusicToggle.IsChecked.GetValueOrDefault(false))
+                    args += "--nomusic ";
+
+                if (HotSwapToggle.IsChecked.GetValueOrDefault(false))
+                    args += "--hotswap ";
+
+                args = args.TrimEnd();
+
+                bool success = await System.Threading.Tasks.Task.Run(
+                    () => SystemProvider.SetAutorunArguments(args));
+
+                if (!success)
+                {
+                    LoadSubOptionsStates();
+                    return;
+                }
+
+                if (AutorunToggle.IsChecked.GetValueOrDefault(false))
+                    UpdateSubOptionsVisibility(true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Error("Autorun", ex, "Failed to update autorun arguments.");
+                LoadSubOptionsStates();
+            }
+            finally
+            {
+                _autorunActionPending = false;
+            }
         }
 
         private void LoadSubOptionsStates()
