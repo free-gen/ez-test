@@ -27,6 +27,8 @@ namespace EZ2Play.App
 
         private bool _selectionColorInitialized;
         private Rect _targetBounds;
+        private FrameworkElement _clipScope;
+        private readonly RectangleGeometry _clipGeometry = new RectangleGeometry();
 
         public sealed class SelectorProfile
         {
@@ -101,6 +103,36 @@ namespace EZ2Play.App
             SnapsToDevicePixels = true;
             UseLayoutRounding = true;
             ClipToBounds = false;
+        }
+
+        public void SetClipScope(FrameworkElement scope)
+        {
+            if (ReferenceEquals(_clipScope, scope)) return;
+
+            _clipScope = scope;
+            Clip = scope == null ? null : _clipGeometry;
+            UpdateClipBounds();
+        }
+
+        private void UpdateClipBounds()
+        {
+            if (_clipScope == null) return;
+
+            Rect bounds = Rect.Empty;
+
+            if (_clipScope.IsVisible &&
+                _clipScope.ActualWidth > 0 && _clipScope.ActualHeight > 0)
+            {
+                try
+                {
+                    bounds = _clipScope.TransformToVisual(this).TransformBounds(
+                        new Rect(0, 0, _clipScope.ActualWidth, _clipScope.ActualHeight));
+                }
+                catch (InvalidOperationException) { }
+            }
+
+            if (!_clipGeometry.Rect.Equals(bounds))
+                _clipGeometry.Rect = bounds;
         }
 
         public void Attach(FrameworkElement target)
@@ -207,6 +239,7 @@ namespace EZ2Play.App
                 return;
 
             UpdateTargetBounds();
+            UpdateClipBounds();
 
             double totalSeconds = (DateTime.UtcNow - _startTime).TotalSeconds;
 
@@ -223,14 +256,12 @@ namespace EZ2Play.App
 
         private void UpdateGlow(double animationTime)
         {
-            if (_target == null)
-                return;
+            if (_target == null) return;
 
             if (animationTime < GlowDuration)
             {
                 double progress = animationTime / GlowDuration;
                 progress = progress * progress * (3 - 2 * progress);
-
                 SetGlowOffset(GlowStartOffset + (GlowEndOffset - GlowStartOffset) * progress);
             }
             else

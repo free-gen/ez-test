@@ -70,6 +70,12 @@ namespace EZ2Play.App
             Visibility = Visibility.Collapsed;
         }
 
+        public void RefreshSelector()
+        {
+            if (Visibility == Visibility.Visible && !_isClosing)
+                UpdateOverlaySelector();
+        }
+
         private void UpdateOverlaySelector()
         {
             if (_selectorCoordinator == null)
@@ -86,8 +92,9 @@ namespace EZ2Play.App
             if (_exitConfirmationMode)
             {
                 var target = ExitConfirmationListBox.SelectedItem as ListBoxItem;
+
                 _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Settings,
-                    target, _selectorCoordinator.CreateOverlayItemProfile());
+                    target, _selectorCoordinator.CreateOverlayItemProfile(), ExitConfirmationListBox);
                 return;
             }
             else if (SettingsListBox.SelectedItem == TreeItemsContainer &&
@@ -114,8 +121,8 @@ namespace EZ2Play.App
                 return;
             }
 
-            _selectorCoordinator.ShowOverlay(
-                SelectorCoordinator.Owner.Settings, selectedItem, _selectorCoordinator.CreateOverlayItemProfile());
+            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Settings,
+                selectedItem, _selectorCoordinator.CreateOverlayItemProfile(), activeListBox);
         }
 
         private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)

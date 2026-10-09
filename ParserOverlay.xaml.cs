@@ -330,6 +330,12 @@ namespace EZ2Play.App
             }), DispatcherPriority.Loaded);
         }
 
+        public void RefreshSelector()
+        {
+            if (!_disposed && !_isClosing && Visibility == Visibility.Visible)
+                UpdateParserSelector();
+        }
+
         private void UpdateParserSelector()
         {
             if (_selectorCoordinator == null)
@@ -379,7 +385,8 @@ namespace EZ2Play.App
                 return;
             }
 
-            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, target, profile);
+            _selectorCoordinator.ShowOverlay(SelectorCoordinator.Owner.Parser, target, profile, 
+                _mode == ParserMode.Games ? (FrameworkElement)activeListBox : ParserContentGrid);
         }
 
         private static T FindVisualChild<T>(DependencyObject parent)

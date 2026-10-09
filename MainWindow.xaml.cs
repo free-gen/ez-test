@@ -39,6 +39,9 @@ namespace EZ2Play
         private bool _hotSwapLaunch;
         private bool _isExiting;
 
+        private bool _displayLayoutRefreshScheduled;
+        private double _lastUiScaleFactor = double.NaN;
+
         private SettingsOverlay _settingsOverlay;
         private ParserOverlay _parserOverlay;
         private SelectorCoordinator _selectorCoordinator;
@@ -126,10 +129,14 @@ namespace EZ2Play
             _guideHandler = new GuideExitHandler(_sound);
             _particlesCanvas = FindName("particles") as ParticlesCanvas;
             _config = new AppConfig();
-            _selectorCoordinator = new SelectorCoordinator(SelectionSelector, ItemsListBox);
+
+            _selectorCoordinator = new SelectorCoordinator(
+                SelectionSelector, ItemsListBox, MainScreenGrid, CarouselWrapper);
 
             _settingsOverlay = new SettingsOverlay(_inputHandler, this, _selectorCoordinator);
             _parserOverlay = new ParserOverlay(_inputHandler, this, _selectorCoordinator);
+
+            _selectorCoordinator.SetOverlaySurfaces(_settingsOverlay, _parserOverlay);
 
             var overlayLayer = new Grid();
             overlayLayer.Children.Add(_settingsOverlay);
@@ -398,7 +405,11 @@ namespace EZ2Play
 
         private void UpdateUiScaleResources(double windowHeight)
         {
+            double scale = LayoutScaler.GetScaleFactor(windowHeight);
+            if (Math.Abs(_lastUiScaleFactor - scale) < 0.0001) return;
+
             LayoutScaler.ApplyUiScaleToDictionary(this.Resources, windowHeight);
+            _lastUiScaleFactor = scale;
         }
 
         private void OnGamepadConnectionChanged(bool connected, string deviceName)
@@ -542,20 +553,46 @@ namespace EZ2Play
             });
         }
 
+        private void RefreshActiveSelector()
+        {
+            if (_isExiting) return;
+
+            if (_settingsOverlay?.Visibility == Visibility.Visible)
+                _settingsOverlay.RefreshSelector();
+            else if (_parserOverlay?.Visibility == Visibility.Visible)
+                _parserOverlay.RefreshSelector();
+            else
+                _selectorCoordinator?.UpdateMain();
+        }
+
+        private void ScheduleDisplayLayoutRefresh()
+        {
+            if (_displayLayoutRefreshScheduled || _isExiting) return;
+            _displayLayoutRefreshScheduled = true;
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!_isExiting && ActualHeight > 0)
+                {
+                    UpdateUiScaleResources(ActualHeight);
+                    ItemsListBox?.InvalidateMeasure();
+                }
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _displayLayoutRefreshScheduled = false;
+                    if (_isExiting || ActualHeight <= 0) return;
+
+                    InitializeCarouselSelectedItem();
+                    RefreshActiveSelector();
+                    _backgroundController?.RefreshPan();
+                }), DispatcherPriority.Loaded);
+            }), DispatcherPriority.Loaded);
+        }
+
         private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e)
         {
-            double h = ActualHeight;
-
-            if (h <= 0) return;
-
-            UpdateUiScaleResources(h);
-            ItemsListBox.InvalidateMeasure();
-            UpdateLayout();
-            InitializeCarouselSelectedItem();
-            ItemsListBox.Items.Refresh();
-
-            _selectorCoordinator.UpdateMain();
-            _backgroundController?.RefreshPan();
+            ScheduleDisplayLayoutRefresh();
         }
 
         protected override void OnActivated(EventArgs e)
@@ -565,7 +602,7 @@ namespace EZ2Play
             if (ActualHeight > 0)
             {
                 UpdateUiScaleResources(ActualHeight);
-                ItemsListBox?.Items.Refresh();
+                Dispatcher.BeginInvoke(new Action(RefreshActiveSelector), DispatcherPriority.Loaded);
             }
         }
 
@@ -609,15 +646,7 @@ namespace EZ2Play
         protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
         {
             base.OnDpiChanged(oldDpi, newDpi);
-
-            Dispatcher.BeginInvoke(new Action(() =>
-            {
-                if (ActualHeight > 0)
-                {
-                    UpdateUiScaleResources(ActualHeight);
-                    ItemsListBox?.Items.Refresh();
-                }
-            }));
+            ScheduleDisplayLayoutRefresh();
         }
 
         private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
