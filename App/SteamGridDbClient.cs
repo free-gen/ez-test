@@ -107,7 +107,8 @@ namespace EZ2Play.App
                 .ToList();
         }
 
-        public async Task<byte[]> DownloadImageAsync(string url, CancellationToken cancellationToken)
+        public async Task<byte[]> DownloadImageAsync(string url, CancellationToken cancellationToken,
+            int maxBytes = MaxImageBytes)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -120,11 +121,14 @@ namespace EZ2Play.App
 
                 long? contentLength = response.Content.Headers.ContentLength;
 
-                if (contentLength.HasValue && contentLength.Value > MaxImageBytes)
-                    throw new InvalidDataException("Image exceeds the 48 MiB download limit.");
+                if (contentLength.HasValue && contentLength.Value > maxBytes)
+                    throw new InvalidDataException("Image exceeds the download limit.");
 
                 using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                using (var output = new MemoryStream())
+                
+                using (var output = new MemoryStream(contentLength.HasValue && 
+                    contentLength.Value > 0 ? (int)contentLength.Value : 0))
+
                 {
                     byte[] buffer = new byte[64 * 1024];
                     int bytesRead;
@@ -134,7 +138,7 @@ namespace EZ2Play.App
                         buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
                     {
                         if (bytesRead > MaxImageBytes - totalBytes)
-                            throw new InvalidDataException("Image exceeds the 48 MiB download limit.");
+                            throw new InvalidDataException("Image exceeds the download limit.");
 
                         output.Write(buffer, 0, bytesRead);
                         totalBytes += bytesRead;
@@ -142,7 +146,7 @@ namespace EZ2Play.App
 
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    return output.ToArray();
+                    return output.Length == output.Capacity ? output.GetBuffer() : output.ToArray();
                 }
             }
         }

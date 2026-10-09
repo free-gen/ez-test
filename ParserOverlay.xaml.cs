@@ -157,6 +157,9 @@ namespace EZ2Play.App
         private const int MaxGames = 15;
         private const int MaxCovers = 30;
         private const int MaxBackgrounds = 30;
+        private const int MaxSourceImageDimension = 16384;
+        private const long MaxSourceImagePixels = 40_000_000L;
+        private const int MaxThumbnailDownloadBytes = 12 * 1024 * 1024;
         private const double FadeDuration = 0.1;
         private const int GameSearchTimeoutSeconds = 3;
         private const double ManualSearchKeyboardGap = 32;
@@ -1403,13 +1406,15 @@ namespace EZ2Play.App
                 cancellationToken.ThrowIfCancellationRequested();
 
                 byte[] bytes = await _steamGridDbClient.DownloadImageAsync(
-                    result.Thumb, cancellationToken);
+                    result.Thumb, cancellationToken, MaxThumbnailDownloadBytes);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
                 BitmapImage bitmap = await Task.Run(() =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+
+                    ValidateSourceImageHeader(bytes);
 
                     using (var stream = new MemoryStream(bytes))
                     {
@@ -1447,6 +1452,124 @@ namespace EZ2Play.App
             }
         }
 
+        private static void ValidateSourceImageHeader(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length < 24)
+                throw new InvalidDataException("Invalid image header.");
+
+            long width = 0;
+            long height = 0;
+
+            // PNG: signature + IHDR
+            if (bytes[0] == 137 && bytes[1] == 80 &&
+                bytes[2] == 78 && bytes[3] == 71 &&
+                bytes[4] == 13 && bytes[5] == 10 &&
+                bytes[6] == 26 && bytes[7] == 10)
+            {
+                if (bytes[8] != 0 || bytes[9] != 0 ||
+                    bytes[10] != 0 || bytes[11] != 13 ||
+                    bytes[12] != 73 || bytes[13] != 72 ||
+                    bytes[14] != 68 || bytes[15] != 82)
+                {
+                    throw new InvalidDataException("Invalid PNG header.");
+                }
+
+                width = ((long)bytes[16] << 24) |
+                        ((long)bytes[17] << 16) |
+                        ((long)bytes[18] << 8) |
+                        bytes[19];
+
+                height = ((long)bytes[20] << 24) |
+                        ((long)bytes[21] << 16) |
+                        ((long)bytes[22] << 8) |
+                        bytes[23];
+            }
+            // JPEG: find Start Of Frame marker
+            else if (bytes[0] == 0xFF && bytes[1] == 0xD8)
+            {
+                int offset = 2;
+                bool found = false;
+
+                while (offset < bytes.Length)
+                {
+                    if (bytes[offset++] != 0xFF)
+                        break;
+
+                    while (offset < bytes.Length && bytes[offset] == 0xFF)
+                        offset++;
+
+                    if (offset >= bytes.Length)
+                        break;
+
+                    int marker = bytes[offset++];
+
+                    if (marker == 0xD9 || marker == 0xDA)
+                        break;
+
+                    if (marker == 0x01 || marker == 0xD8 ||
+                        (marker >= 0xD0 && marker <= 0xD7))
+                        continue;
+
+                    if (offset > bytes.Length - 2)
+                        break;
+
+                    int length = (bytes[offset] << 8) | bytes[offset + 1];
+
+                    if (length < 2 || length > bytes.Length - offset)
+                        break;
+
+                    bool isSof = marker >= 0xC0 && marker <= 0xCF &&
+                                marker != 0xC4 && marker != 0xC8 &&
+                                marker != 0xCC;
+
+                    if (isSof)
+                    {
+                        if (length < 7)
+                            break;
+
+                        height = (bytes[offset + 3] << 8) | bytes[offset + 4];
+                        width = (bytes[offset + 5] << 8) | bytes[offset + 6];
+
+                        found = true;
+                        break;
+                    }
+
+                    offset += length;
+                }
+
+                if (!found)
+                    throw new InvalidDataException("Invalid JPEG header.");
+            }
+            else
+            {
+                throw new InvalidDataException("Unsupported image format.");
+            }
+
+            if (width <= 0 || height <= 0 ||
+                width > MaxSourceImageDimension ||
+                height > MaxSourceImageDimension ||
+                width * height > MaxSourceImagePixels)
+            {
+                throw new InvalidDataException(
+                    $"Image dimensions exceed supported limits: {width}x{height}.");
+            }
+        }
+
+        private static void ValidateSourceImageDimensions(Drawing.Image image)
+        {
+            int width = image.Width;
+            int height = image.Height;
+
+            if (width <= 0 || height <= 0 ||
+                width > MaxSourceImageDimension ||
+                height > MaxSourceImageDimension ||
+                (long)width * height > MaxSourceImagePixels)
+            {
+                throw new InvalidDataException(
+                    $"Image dimensions exceed supported limits: {width}x{height}.");
+            }
+        }
+
         private async Task DownloadCoverAsync(ParserGridResult cover, CancellationToken cancellationToken)
         {
             _isBusy = true;
@@ -1468,6 +1591,9 @@ namespace EZ2Play.App
 
                 await Task.Run(() =>
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ValidateSourceImageHeader(bytes);
+
                     string coversDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "shortcuts", "covers");
 
                 Directory.CreateDirectory(coversDirectory);
@@ -1480,6 +1606,8 @@ namespace EZ2Play.App
                 using (var sourceImage = Drawing.Image.FromStream(input, true, true))
                 using (var resizedImage = new Drawing.Bitmap(512, 512, DrawingImaging.PixelFormat.Format32bppArgb))
                 {
+                    ValidateSourceImageDimensions(sourceImage);
+
                     using (var graphics = Drawing.Graphics.FromImage(resizedImage))
                     {
                         graphics.Clear(Drawing.Color.Transparent);
@@ -1596,11 +1724,16 @@ namespace EZ2Play.App
 
                 await Task.Run(() =>
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ValidateSourceImageHeader(bytes);
+
                     string extension;
 
                 using (var input = new MemoryStream(bytes))
                 using (var sourceImage = Drawing.Image.FromStream(input, true, true))
                 {
+                    ValidateSourceImageDimensions(sourceImage);
+
                     if (sourceImage.Width < 3840)
                         throw new InvalidDataException($"Background width is only {sourceImage.Width}px. Minimum required width is 3840px.");
 
@@ -1623,6 +1756,8 @@ namespace EZ2Play.App
 
                 using (var verifyImage = Drawing.Image.FromStream(verifyStream, true, true))
                 {
+                    ValidateSourceImageDimensions(verifyImage);
+
                     if (verifyImage.Width < 3840)
                         throw new InvalidDataException("Saved background has invalid dimensions.");
                 }
